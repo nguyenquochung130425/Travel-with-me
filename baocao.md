@@ -346,7 +346,17 @@ d:\Travel-with-me\
 
 ### 6.2. Các bước khởi chạy dự án
 
-#### Bước 1: Khởi động Backend API Server
+#### Bước 1: Khởi tạo Cơ sở dữ liệu Microsoft SQL Server
+1. Mở Azure Data Studio hoặc VS Code MSSQL Extension.
+2. Thiết lập kết nối (Connection Properties):
+   - **Server Name:** `localhost`
+   - **Authentication:** `Windows Authentication` (hoặc `SQL Login` với User: `travel_user`, Mật khẩu: `Travel@2026`)
+   - **Database Name:** Chọn `TravelWithMe` (hoặc `<default>`)
+   - **Encrypt:** `Mandatory`
+   - **Trust Server Certificate:** ✅ Đánh dấu chọn (Checked)
+3. Chạy file kịch bản [SQLQuery1.sql](file:///d:/Travel-with-me/SQLQuery1.sql) để tự động tạo trọn vẹn 19 bảng, khóa ngoại, chỉ mục và vai trò hệ thống trong Database `TravelWithMe`.
+
+#### Bước 2: Khởi động Backend API Server (Node.js + Express + MSSQL)
 Mở một cửa sổ Terminal (PowerShell / Command Prompt), di chuyển vào thư mục `server`:
 ```powershell
 cd d:\Travel-with-me\server
@@ -354,9 +364,14 @@ npm install
 npm run dev
 ```
 - Khi chạy thành công, màn hình sẽ thông báo:
-  `[Travel With Me API] Server running at http://localhost:5000`
+  ```
+  [Travel With Me API] Server running at http://localhost:5000
+  [SQL Server] Đã kết nối thành công tới Database: TravelWithMe trên localhost!
+  [Travel With Me API] ✅ Đã kết nối thành công với Microsoft SQL Server (Database: TravelWithMe)!
+  ```
+- Kiểm tra trạng thái kết nối SQL Server qua endpoint: 👉 `http://localhost:5000/api/db/health` (Trả về `{ "success": true, "status": "CONNECTED", "database": "TravelWithMe", "totalTables": 19 }`).
 
-#### Bước 2: Khởi động Giao diện Frontend Client
+#### Bước 3: Khởi động Giao diện Frontend Client
 Mở một cửa sổ Terminal thứ hai, di chuyển vào thư mục `client`:
 ```powershell
 cd d:\Travel-with-me\client
@@ -366,7 +381,7 @@ npm run dev
 - Khi chạy thành công, Vite sẽ cung cấp địa chỉ truy cập:
   `Local: http://localhost:5173/`
 
-#### Bước 3: Truy cập và Trải nghiệm
+#### Bước 4: Truy cập và Trải nghiệm
 Mở trình duyệt web (Chrome, Edge, Firefox, Cốc Cốc) và truy cập vào:
 👉 **`http://localhost:5173/`**
 

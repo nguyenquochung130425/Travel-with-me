@@ -1,5 +1,6 @@
 import express from 'express';
 import cors from 'cors';
+import { getDbPool } from './db.js';
 import {
   mockCategories,
   mockTours,
@@ -482,6 +483,37 @@ app.patch('/api/admin/bookings/:id/status', (req, res) => {
   });
 });
 
-app.listen(PORT, () => {
+// 12. Kiểm tra kết nối SQL Server
+app.get('/api/db/health', async (req, res) => {
+  try {
+    const pool = await getDbPool();
+    const result = await pool.request().query(`
+      SELECT 
+        DB_NAME() AS current_database,
+        (SELECT COUNT(*) FROM sys.tables) AS total_tables
+    `);
+    res.json({
+      success: true,
+      status: 'CONNECTED',
+      database: result.recordset[0].current_database,
+      totalTables: result.recordset[0].total_tables,
+      timestamp: new Date().toISOString()
+    });
+  } catch (err) {
+    res.status(500).json({
+      success: false,
+      status: 'DISCONNECTED',
+      error: err.message
+    });
+  }
+});
+
+app.listen(PORT, async () => {
   console.log(`[Travel With Me API] Server running at http://localhost:${PORT}`);
+  try {
+    const pool = await getDbPool();
+    console.log('[Travel With Me API] ✅ Đã kết nối thành công với Microsoft SQL Server (Database: TravelWithMe)!');
+  } catch (err) {
+    console.warn('[Travel With Me API] ⚠️ Chưa thể kết nối SQL Server:', err.message);
+  }
 });
