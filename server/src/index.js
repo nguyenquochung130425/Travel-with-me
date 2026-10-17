@@ -483,6 +483,104 @@ app.patch('/api/admin/bookings/:id/status', (req, res) => {
   });
 });
 
+// ============================================================================
+// PHÂN HỆ PHÂN QUYỀN (AUTHENTICATION & RBAC)
+// ============================================================================
+
+// Lấy danh sách vai trò hệ thống từ SQL Server
+app.get('/api/auth/roles', async (req, res) => {
+  try {
+    const pool = await getDbPool();
+    const result = await pool.request().query(`
+      SELECT role_id, role_name, description FROM dbo.roles ORDER BY role_id ASC;
+    `);
+    res.json({ success: true, data: result.recordset });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// Lấy danh sách người dùng kèm vai trò từ SQL Server
+app.get('/api/auth/users', async (req, res) => {
+  try {
+    const pool = await getDbPool();
+    const result = await pool.request().query(`
+      SELECT 
+        u.user_id,
+        u.full_name,
+        u.email,
+        u.phone_number,
+        r.role_id,
+        r.role_name,
+        r.description AS role_description,
+        u.is_active,
+        u.created_at
+      FROM dbo.users u
+      INNER JOIN dbo.roles r ON u.role_id = r.role_id
+      ORDER BY r.role_id ASC, u.user_id ASC;
+    `);
+    res.json({ success: true, data: result.recordset });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// API Đăng nhập phân quyền
+app.post('/api/auth/login', async (req, res) => {
+  const { email, password } = req.body;
+  if (!email) {
+    return res.status(400).json({ success: false, message: 'Vui lòng cung cấp email đăng nhập' });
+  }
+
+  try {
+    const pool = await getDbPool();
+    const result = await pool.request()
+      .input('email', email.trim().toLowerCase())
+      .query(`
+        SELECT 
+          u.user_id,
+          u.full_name,
+          u.email,
+          u.phone_number,
+          u.password_hash,
+          r.role_id,
+          r.role_name,
+          r.description AS role_description,
+          u.is_active
+        FROM dbo.users u
+        INNER JOIN dbo.roles r ON u.role_id = r.role_id
+        WHERE LOWER(u.email) = @email;
+      `);
+
+    if (result.recordset.length === 0) {
+      return res.status(401).json({ success: false, message: 'Tài khoản không tồn tại trong hệ thống' });
+    }
+
+    const user = result.recordset[0];
+    if (!user.is_active) {
+      return res.status(403).json({ success: false, message: 'Tài khoản đã bị tạm khóa' });
+    }
+
+    res.json({
+      success: true,
+      message: `Đăng nhập thành công với vai trò ${user.role_name}`,
+      data: {
+        userId: user.user_id,
+        fullName: user.full_name,
+        email: user.email,
+        phone: user.phone_number,
+        role: user.role_name,
+        roleDescription: user.role_description,
+        isAdmin: user.role_name === 'SUPER_ADMIN' || user.role_name === 'ADMIN',
+        isStaff: user.role_name === 'STAFF',
+        isUser: user.role_name === 'USER'
+      }
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
 // 12. Kiểm tra kết nối SQL Server
 app.get('/api/db/health', async (req, res) => {
   try {

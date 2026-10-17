@@ -10,6 +10,7 @@ import { MyTripsModal } from './components/MyTripsModal';
 import { ReviewModal } from './components/ReviewModal';
 import { AdminDashboard } from './components/AdminDashboard';
 import { ChatbotWidget } from './components/ChatbotWidget';
+import { RoleModal } from './components/RoleModal';
 
 import {
   mockTours,
@@ -27,6 +28,16 @@ export default function App() {
   const [coupons, setCoupons] = useState(mockCoupons);
   const [bookings, setBookings] = useState(initialBookings);
   const [wishlist, setWishlist] = useState(['tour-1']); // Default 1 item
+
+  // RBAC User Authentication State
+  const [currentUser, setCurrentUser] = useState({
+    id: '3',
+    fullName: 'Nguyễn Quốc Hùng',
+    email: 'hung@example.com',
+    role: 'USER',
+    roleBadge: 'Khách Hàng Du Lịch'
+  });
+  const [showRoleModal, setShowRoleModal] = useState(false);
 
   // Toast notification
   const [toastMessage, setToastMessage] = useState('');
@@ -281,6 +292,9 @@ export default function App() {
           setSelectedCategory('all');
           showToast(`Đang hiển thị ${wishlist.length} tour trong danh sách yêu thích của bạn`);
         }}
+        currentUser={currentUser}
+        openRoleModal={() => setShowRoleModal(true)}
+        showToast={showToast}
       />
 
       {/* MAIN VIEW: CLIENT OR ADMIN */}
@@ -466,6 +480,20 @@ export default function App() {
           onSubmitReview={handleSubmitReview}
         />
       )}
+
+      {/* 6. Role & RBAC Modal */}
+      <RoleModal
+        isOpen={showRoleModal}
+        onClose={() => setShowRoleModal(false)}
+        currentUser={currentUser}
+        onSelectUser={(user) => {
+          setCurrentUser(user);
+          if (user.role === 'USER' && currentView === 'admin') {
+            setCurrentView('client');
+          }
+        }}
+        onNotify={showToast}
+      />
     </div>
   );
 }

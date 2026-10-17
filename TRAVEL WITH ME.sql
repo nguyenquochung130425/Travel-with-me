@@ -363,3 +363,26 @@ INSERT INTO dbo.roles (role_name, description) VALUES
 ('STAFF', N'Nhân viên điều hành tour và quản lý booking'),
 ('USER', N'Khách hàng du lịch');
 GO
+
+-- 6.2. Tài khoản mẫu kiểm thử phân quyền (RBAC Test Accounts)
+INSERT INTO dbo.users (role_id, full_name, email, password_hash, phone_number, is_active, is_verified) VALUES
+(1, N'Quản Trị Viên Hệ Thống', 'admin@travelwithme.vn', '$2a$10$7EqJtq98hPqEX7fNZaFWoO.8/h6y3eI1cM2OqGkGg6d5F4e3A2b1C', '0988889999', 1, 1),
+(2, N'Nguyễn Điều Hành', 'staff@travelwithme.vn', '$2a$10$7EqJtq98hPqEX7fNZaFWoO.8/h6y3eI1cM2OqGkGg6d5F4e3A2b1C', '0977778888', 1, 1),
+(3, N'Nguyễn Quốc Hùng', 'hung@example.com', '$2a$10$7EqJtq98hPqEX7fNZaFWoO.8/h6y3eI1cM2OqGkGg6d5F4e3A2b1C', '0912345678', 1, 1),
+(3, N'Trần Thị Mai', 'mai.tran@example.com', '$2a$10$7EqJtq98hPqEX7fNZaFWoO.8/h6y3eI1cM2OqGkGg6d5F4e3A2b1C', '0905123456', 1, 1);
+GO
+
+-- 6.3. Truy vấn kiểm tra người dùng và vai trò phân quyền (RBAC Query)
+SELECT 
+    u.user_id,
+    u.full_name,
+    u.email,
+    u.phone_number,
+    r.role_name,
+    r.description AS role_description,
+    u.is_active,
+    u.created_at
+FROM dbo.users u
+INNER JOIN dbo.roles r ON u.role_id = r.role_id
+ORDER BY r.role_id ASC, u.user_id ASC;
+GO

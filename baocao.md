@@ -250,7 +250,33 @@ stateDiagram-v2
 11. **`Wishlist` (Danh sách yêu thích):**
     - `id` (UUID, PK), `userId` (FK), `tourId` (FK), `createdAt`.
 
+### 4.3. Mô hình phân quyền người dùng (Role-Based Access Control - RBAC)
+Hệ thống cài đặt cơ chế phân quyền dựa trên vai trò (RBAC) chặt chẽ giữa 3 cấp độ tài khoản lưu trữ trong bảng `dbo.roles` và `dbo.users` của Microsoft SQL Server:
+1. **`SUPER_ADMIN` (Quản trị viên cấp cao):** Toàn quyền kiểm soát hệ thống, quản lý doanh thu, duyệt đơn, xuất file CSV hành khách, thiết lập vai trò và quản lý tour.
+2. **`STAFF` (Nhân viên điều hành):** Điều phối lịch khởi hành, tiếp nhận yêu cầu đặt tour, kiểm tra thông tin khách và cập nhật trạng thái đơn hàng.
+3. **`USER` (Khách hàng du lịch):** Khám phá tour, đặt chỗ, thanh toán, xem vé điện tử QR Code, yêu cầu hủy vé theo chính sách và gửi đánh giá.
+
+#### Bảng ma trận phân quyền chi tiết (RBAC Matrix):
+| Nghiệp vụ hệ thống | Khách Hàng (`USER`) | Nhân Viên (`STAFF`) | Quản Trị Viên (`SUPER_ADMIN`) |
+| :--- | :---: | :---: | :---: |
+| **Tìm kiếm & Xem chi tiết tour** | ✅ Cho phép | ✅ Cho phép | ✅ Cho phép |
+| **Đặt tour & Thanh toán VietQR** | ✅ Cho phép | ✅ Cho phép | ✅ Cho phép |
+| **Xem vé điện tử & Mã QR Check-in** | ✅ (Chỉ vé của mình) | ✅ (Tất cả vé khách) | ✅ (Toàn quyền tra cứu) |
+| **Yêu cầu hủy tour & Hoàn tiền** | ✅ (Theo tỷ lệ chính sách) | ✅ (Tiếp nhận & kiểm tra) | ✅ (Duyệt lệnh hoàn tiền) |
+| **Gửi đánh giá & Chấm sao** | ✅ Cho phép sau tour | ❌ Không cho phép | ✅ Kiểm duyệt & Xóa vi phạm |
+| **Truy cập Kênh Quản Trị (Admin Portal)** | ❌ Bị chặn (Access Denied) | ✅ Cho phép | ✅ Cho phép |
+| **Báo cáo & Biểu đồ doanh thu 6 tháng** | ❌ Bị chặn | ❌ Bị chặn | ✅ Xem đầy đủ biểu đồ & KPI |
+| **Cập nhật trạng thái đơn đặt tour** | ❌ Bị chặn | ✅ Cập nhật trạng thái | ✅ Cập nhật & Hủy bỏ |
+| **Xuất danh sách hành khách ra CSV/Excel**| ❌ Bị chặn | ✅ Cho phép xuất file | ✅ Cho phép xuất file |
+| **Quản lý tài khoản & Cấu hình vai trò** | ❌ Bị chặn | ❌ Bị chặn | ✅ Toàn quyền quản trị |
+
+#### Danh sách tài khoản mẫu kiểm thử phân quyền (SQL Server Seed Accounts):
+- **Admin:** `admin@travelwithme.vn` (Mật khẩu: `Admin@2026` / `Password@123` - Vai trò: `SUPER_ADMIN`)
+- **Staff:** `staff@travelwithme.vn` (Mật khẩu: `Staff@2026` / `Password@123` - Vai trò: `STAFF`)
+- **User:** `hung@example.com` (Mật khẩu: `User@2026` / `Password@123` - Vai trò: `USER`)
+
 ---
+
 
 # CHƯƠNG 5: HIỆN THỰC HÓA GIAO DIỆN & KẾT QUẢ ĐẠT ĐƯỢC
 
