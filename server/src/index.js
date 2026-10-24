@@ -1,6 +1,8 @@
+import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
 import { getDbPool } from './db.js';
+import authRouter from './auth.js';
 import {
   mockCategories,
   mockTours,
@@ -14,6 +16,9 @@ const PORT = process.env.PORT || 5000;
 
 app.use(cors());
 app.use(express.json());
+
+// ── Authentication (register, login, forgot/reset password) ──
+app.use('/api/auth', authRouter);
 
 // In-memory data store for live state changes
 let toursData = JSON.parse(JSON.stringify(mockTours));
@@ -484,7 +489,8 @@ app.patch('/api/admin/bookings/:id/status', (req, res) => {
 });
 
 // ============================================================================
-// PHÂN HỆ PHÂN QUYỀN (AUTHENTICATION & RBAC)
+// PHÂN HỆ PHÂN QUYỀN – RBAC QUERIES (read-only, served by index.js)
+// Full register/login/forgot/reset handled by /api/auth router above
 // ============================================================================
 
 // Lấy danh sách vai trò hệ thống từ SQL Server

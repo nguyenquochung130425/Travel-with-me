@@ -50,7 +50,7 @@
 cd server
 npm install
 npm run dev
-# Server lắng nghe tại: http://localhost:5000
+# Server lắng nghe tại: http://localhost:5000 (hoặc PORT=5001 nếu 5000 đang bận)
 ```
 
 ### 2. Khởi chạy Frontend Client:
@@ -60,6 +60,8 @@ npm install
 npm run dev
 # Ứng dụng chạy tại: http://localhost:5173
 ```
+
+> Nếu backend chạy ở cổng khác, đặt biến môi trường `VITE_API_TARGET` hoặc `VITE_API_URL` trước khi chạy client.
 
 ---
 

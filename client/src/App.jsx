@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { Navbar } from './components/Navbar';
 import { HeroSection } from './components/HeroSection';
 import { FilterBar } from './components/FilterBar';
@@ -11,6 +11,8 @@ import { ReviewModal } from './components/ReviewModal';
 import { AdminDashboard } from './components/AdminDashboard';
 import { ChatbotWidget } from './components/ChatbotWidget';
 import { RoleModal } from './components/RoleModal';
+import { AuthModal } from './components/AuthModal';
+import { SitePreloader } from './components/SitePreloader';
 
 import {
   mockTours,
@@ -29,7 +31,27 @@ export default function App() {
   const [bookings, setBookings] = useState(initialBookings);
   const [wishlist, setWishlist] = useState(['tour-1']); // Default 1 item
 
-  // RBAC User Authentication State
+  // ── Authentication state ──────────────────────────────────────────────────
+  const storedUser = (() => { try { return JSON.parse(localStorage.getItem('twm_user')); } catch { return null; } })();
+  const [authUser, setAuthUser] = useState(storedUser); // real logged-in user (JWT)
+  const [showAuth, setShowAuth] = useState(false);       // show login/register modal
+  const [showPreloader, setShowPreloader] = useState(false); // full-screen preloader
+
+  const handleLoginSuccess = useCallback((userData) => {
+    setAuthUser(userData);
+    setShowAuth(false);
+    setShowPreloader(true); // trigger full-screen count-up preloader
+  }, []);
+
+  const handleLogout = useCallback(() => {
+    localStorage.removeItem('twm_token');
+    localStorage.removeItem('twm_user');
+    setAuthUser(null);
+    setCurrentUser({ id: '3', fullName: 'Nguyễn Quốc Hùng', email: 'hung@example.com', role: 'USER', roleBadge: 'Khách Hàng Du Lịch' });
+    showToast('Đã đăng xuất thành công');
+  }, []);
+
+  // RBAC User (legacy role switcher, kept for admin demo)
   const [currentUser, setCurrentUser] = useState({
     id: '3',
     fullName: 'Nguyễn Quốc Hùng',
@@ -274,6 +296,18 @@ export default function App() {
 
   return (
     <div className="travel-app-root">
+      {/* Full-screen count-up preloader on login success */}
+      {showPreloader && (
+        <SitePreloader onDone={() => setShowPreloader(false)} />
+      )}
+
+      {/* Auth Modal (login / register / forgot-password) */}
+      <AuthModal
+        isOpen={showAuth}
+        onClose={() => setShowAuth(false)}
+        onLoginSuccess={handleLoginSuccess}
+      />
+
       {/* Toast Notification */}
       {toastMessage && (
         <div className="toast-notification-pill animate-fade-in">
@@ -293,7 +327,10 @@ export default function App() {
           showToast(`Đang hiển thị ${wishlist.length} tour trong danh sách yêu thích của bạn`);
         }}
         currentUser={currentUser}
+        authUser={authUser}
         openRoleModal={() => setShowRoleModal(true)}
+        openAuth={() => setShowAuth(true)}
+        onLogout={handleLogout}
         showToast={showToast}
       />
 
