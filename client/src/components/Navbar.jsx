@@ -1,5 +1,5 @@
 import React from 'react';
-import { Compass, Heart, Briefcase, Shield, User, Sparkles, Crown, Key } from 'lucide-react';
+import { Compass, Heart, Briefcase, Shield, User, Sparkles, Crown, Key, LogIn, LogOut, Award } from 'lucide-react';
 
 export function Navbar({
   currentView,
@@ -8,15 +8,21 @@ export function Navbar({
   openMyTrips,
   openWishlist,
   currentUser,
+  authUser,
   openRoleModal,
+  openAuth,
+  onLogout,
   showToast
 }) {
+  const effectiveRole = authUser?.role || currentUser?.role || 'USER';
+  const isAdmin = effectiveRole === 'SUPER_ADMIN' || effectiveRole === 'ADMIN';
+  const canAccessAdmin = isAdmin || effectiveRole === 'STAFF';
+
   const handleToggleView = () => {
     if (currentView === 'client') {
       // Trying to enter Admin Portal
-      if (currentUser?.role === 'USER') {
-        showToast('🔒 Khách hàng (USER) không có quyền truy cập Kênh Quản trị! Vui lòng chọn tài khoản Quản trị.');
-        openRoleModal();
+      if (!canAccessAdmin) {
+        showToast('🔒 Khách hàng (USER) không có quyền truy cập Kênh Quản trị!');
         return;
       }
       setCurrentView('admin');
@@ -36,8 +42,14 @@ export function Navbar({
     }
   };
 
-  const badgeInfo = getRoleBadge(currentUser?.role);
+  const badgeInfo = getRoleBadge(effectiveRole);
   const BadgeIcon = badgeInfo.icon;
+
+  const displayName = authUser
+    ? (authUser.fullName?.trim() || authUser.email?.split('@')[0] || 'Thành viên')
+    : (currentUser?.fullName?.split(' ')[0] || 'Tài khoản');
+
+  const eloScore = authUser?.elo ?? 1000;
 
   return (
     <header className="navbar-wrapper">
@@ -89,43 +101,79 @@ export function Navbar({
             )}
           </button>
 
-          {/* Mode Switcher: Client vs Admin (RBAC Protected) */}
-          <button
-            className={`mode-toggle-btn ${currentView === 'admin' ? 'admin-active' : ''}`}
-            onClick={handleToggleView}
-            title={currentUser?.role === 'USER' ? 'Cần quyền Admin để mở' : 'Chuyển đổi giao diện Khách hàng & Quản trị'}
-          >
-            {currentView === 'client' ? (
-              <>
-                <Shield size={16} />
-                <span>Kênh Quản Trị</span>
-                {currentUser?.role === 'USER' && <span className="lock-dot" title="Chặn quyền">🔒</span>}
-              </>
-            ) : (
-              <>
-                <Sparkles size={16} />
-                <span>Xem Giao Diện Khách</span>
-              </>
-            )}
-          </button>
+          {/* Mode Switcher: Client vs Admin (Only shown for Admin & Staff) */}
+          {canAccessAdmin && (
+            <button
+              className={`mode-toggle-btn ${currentView === 'admin' ? 'admin-active' : ''}`}
+              onClick={handleToggleView}
+              title="Chuyển đổi giao diện Khách hàng & Quản trị"
+            >
+              {currentView === 'client' ? (
+                <>
+                  <Shield size={16} />
+                  <span>Kênh Quản Trị</span>
+                </>
+              ) : (
+                <>
+                  <Sparkles size={16} />
+                  <span>Xem Giao Diện Khách</span>
+                </>
+              )}
+            </button>
+          )}
 
-          {/* User Profile Avatar with RBAC Switcher */}
-          <div
-            className="user-profile-btn"
-            onClick={openRoleModal}
-            title="Nhấp để xem và đổi phân quyền tài khoản (RBAC)"
-          >
-            <div className="user-avatar">
-              <BadgeIcon size={18} />
+          {/* User Auth & Profile Section */}
+          {authUser ? (
+            <div className="nav-auth-logged-in">
+              <div
+                className={`user-profile-btn ${!isAdmin ? 'cursor-default' : ''}`}
+                onClick={isAdmin ? openRoleModal : undefined}
+                title={isAdmin ? "Tài khoản Quản trị viên · Nhấp để quản lý phân quyền (RBAC)" : `Tài khoản: ${displayName}`}
+              >
+                <div className="user-avatar">
+                  {authUser.avatar ? (
+                    <img src={authUser.avatar} alt="Avatar" className="user-avatar-img" />
+                  ) : (
+                    <BadgeIcon size={18} />
+                  )}
+                </div>
+                <div className="user-meta">
+                  <span className="user-name">{displayName}</span>
+                  <div className="user-sub-pills">
+                    <span className="user-elo-pill" title={`Hệ số uy tín du lịch: ${eloScore} Elo`}>
+                      <Award size={11} />
+                      <span>{eloScore} Elo</span>
+                    </span>
+                    <span className={`user-role-pill ${badgeInfo.className}`}>
+                      {badgeInfo.text}
+                    </span>
+                  </div>
+                </div>
+                {isAdmin && <Key size={14} className="key-icon-hint text-amber-500" title="Quản lý vai trò (RBAC)" />}
+              </div>
+
+              {/* Logout Button */}
+              <button
+                className="btn-auth-logout"
+                onClick={onLogout}
+                title="Đăng xuất khỏi tài khoản"
+              >
+                <LogOut size={16} />
+                <span className="logout-text">Đăng Xuất</span>
+              </button>
             </div>
-            <div className="user-meta">
-              <span className="user-name">{currentUser?.fullName?.split(' ')[0] || 'Tài khoản'}</span>
-              <span className={`user-role-pill ${badgeInfo.className}`}>
-                {badgeInfo.text}
-              </span>
+          ) : (
+            <div className="nav-auth-guest">
+              <button
+                className="btn-auth-login"
+                onClick={openAuth}
+                title="Đăng nhập hoặc đăng ký tài khoản"
+              >
+                <LogIn size={16} />
+                <span>Đăng Nhập</span>
+              </button>
             </div>
-            <Key size={14} className="key-icon-hint text-slate-400" />
-          </div>
+          )}
         </div>
       </div>
     </header>

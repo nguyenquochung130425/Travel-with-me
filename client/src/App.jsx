@@ -28,30 +28,18 @@ export default function App() {
   const [tours, setTours] = useState(mockTours);
   const [categories, setCategories] = useState(mockCategories);
   const [coupons, setCoupons] = useState(mockCoupons);
-  const [bookings, setBookings] = useState(initialBookings);
-  const [wishlist, setWishlist] = useState(['tour-1']); // Default 1 item
+  const [bookings, setBookings] = useState([]); // Khởi tạo rỗng, nạp từ SQL Server theo từng tài khoản
+  const [wishlist, setWishlist] = useState([]); // Khởi tạo rỗng, nạp theo từng tài khoản
+  const [showOnlyWishlist, setShowOnlyWishlist] = useState(false);
 
-  // ── Authentication state ──────────────────────────────────────────────────
-  const storedUser = (() => { try { return JSON.parse(localStorage.getItem('twm_user')); } catch { return null; } })();
-  const [authUser, setAuthUser] = useState(storedUser); // real logged-in user (JWT)
-  const [showAuth, setShowAuth] = useState(false);       // show login/register modal
-  const [showPreloader, setShowPreloader] = useState(false); // full-screen preloader
-
-  const handleLoginSuccess = useCallback((userData) => {
-    setAuthUser(userData);
-    setShowAuth(false);
-    setShowPreloader(true); // trigger full-screen count-up preloader
+  // Toast notification
+  const [toastMessage, setToastMessage] = useState('');
+  const showToast = useCallback((msg) => {
+    setToastMessage(msg);
+    setTimeout(() => setToastMessage(''), 3500);
   }, []);
 
-  const handleLogout = useCallback(() => {
-    localStorage.removeItem('twm_token');
-    localStorage.removeItem('twm_user');
-    setAuthUser(null);
-    setCurrentUser({ id: '3', fullName: 'Nguyễn Quốc Hùng', email: 'hung@example.com', role: 'USER', roleBadge: 'Khách Hàng Du Lịch' });
-    showToast('Đã đăng xuất thành công');
-  }, []);
-
-  // RBAC User (legacy role switcher, kept for admin demo)
+  // RBAC User (role switcher, kept for admin demo)
   const [currentUser, setCurrentUser] = useState({
     id: '3',
     fullName: 'Nguyễn Quốc Hùng',
@@ -61,12 +49,71 @@ export default function App() {
   });
   const [showRoleModal, setShowRoleModal] = useState(false);
 
-  // Toast notification
-  const [toastMessage, setToastMessage] = useState('');
-  const showToast = (msg) => {
-    setToastMessage(msg);
-    setTimeout(() => setToastMessage(''), 3500);
-  };
+  // ── Authentication state ──────────────────────────────────────────────────
+  const storedUser = (() => { try { return JSON.parse(localStorage.getItem('twm_user')); } catch { return null; } })();
+  const [authUser, setAuthUser] = useState(storedUser); // real logged-in user (JWT)
+  const [showAuth, setShowAuth] = useState(false);       // show login/register modal
+  const [showPreloader, setShowPreloader] = useState(false); // full-screen preloader
+
+  // Đồng bộ Wishlist & Lịch sử Chuyến Đi theo tài khoản đăng nhập (userId)
+  useEffect(() => {
+    if (authUser?.userId || authUser?.id) {
+      const uid = authUser.userId || authUser.id;
+      // 1. Tải danh sách yêu thích của riêng tài khoản này từ localStorage
+      try {
+        const savedWishlist = JSON.parse(localStorage.getItem(`twm_wishlist_${uid}`) || '[]');
+        setWishlist(Array.isArray(savedWishlist) ? savedWishlist : []);
+      } catch {
+        setWishlist([]);
+      }
+
+      // 2. Tải lịch sử chuyến đi của tài khoản từ SQL Server qua API
+      fetch(`/api/bookings/my-trips?userId=${uid}`)
+        .then((res) => res.json())
+        .then((res) => {
+          if (res.success && Array.isArray(res.data)) {
+            setBookings(res.data);
+          } else {
+            setBookings([]);
+          }
+        })
+        .catch((err) => {
+          console.error('[Lỗi tải My-Trips]:', err);
+          setBookings([]);
+        });
+    } else {
+      // Khi không có tài khoản (Khách vãng lai), đặt về rỗng
+      setWishlist([]);
+      setBookings([]);
+      setShowOnlyWishlist(false);
+    }
+  }, [authUser]);
+
+  const handleLoginSuccess = useCallback((userData) => {
+    setAuthUser(userData);
+    setShowAuth(false);
+    setShowPreloader(true); // trigger full-screen count-up preloader
+    if (userData?.role) {
+      setCurrentUser((prev) => ({
+        ...prev,
+        fullName: userData.fullName || prev.fullName,
+        email: userData.email || prev.email,
+        role: userData.role
+      }));
+    }
+    showToast(`Chào mừng ${userData.fullName || 'bạn'} trở lại!`);
+  }, [showToast]);
+
+  const handleLogout = useCallback(() => {
+    localStorage.removeItem('twm_token');
+    localStorage.removeItem('twm_user');
+    setAuthUser(null);
+    setBookings([]);
+    setWishlist([]);
+    setShowOnlyWishlist(false);
+    setCurrentUser({ id: '3', fullName: 'Nguyễn Quốc Hùng', email: 'hung@example.com', role: 'USER', roleBadge: 'Khách Hàng Du Lịch' });
+    showToast('Đã đăng xuất thành công');
+  }, [showToast]);
 
   // Search & Filter State
   const [filters, setFilters] = useState({
@@ -100,6 +147,14 @@ export default function App() {
         setTours(mockTours);
       });
   }, []);
+
+  // Automatically redirect away from admin view if current role is USER
+  useEffect(() => {
+    const role = authUser?.role || currentUser?.role || 'USER';
+    if (role === 'USER' && currentView === 'admin') {
+      setCurrentView('client');
+    }
+  }, [authUser, currentUser, currentView]);
 
   // Filter calculation
   const filteredTours = tours.filter((t) => {
@@ -137,6 +192,11 @@ export default function App() {
     if (filters.priceRange === '4m_6m' && (minTourPrice < 4000000 || minTourPrice > 6000000)) return false;
     if (filters.priceRange === 'above_6m' && minTourPrice <= 6000000) return false;
 
+    // Wishlist Only Filter
+    if (showOnlyWishlist && !wishlist.includes(t.id)) {
+      return false;
+    }
+
     return true;
   });
 
@@ -151,22 +211,38 @@ export default function App() {
     return b.reviewCount - a.reviewCount; // popular
   });
 
-  // Wishlist toggle
+  // Wishlist toggle (Bảo vệ: Chỉ người dùng đã đăng nhập mới được lưu)
   const handleToggleWishlist = (tourId) => {
+    if (!authUser) {
+      showToast('Vui lòng đăng nhập để lưu tour vào danh sách yêu thích!');
+      setShowAuth(true);
+      return;
+    }
+    const uid = authUser.userId || authUser.id;
     setWishlist((prev) => {
       const exists = prev.includes(tourId);
+      let updated;
       if (exists) {
         showToast('Đã xóa tour khỏi danh sách yêu thích');
-        return prev.filter((id) => id !== tourId);
+        updated = prev.filter((id) => id !== tourId);
       } else {
         showToast('Đã lưu tour vào danh sách yêu thích!');
-        return [...prev, tourId];
+        updated = [...prev, tourId];
       }
+      try {
+        localStorage.setItem(`twm_wishlist_${uid}`, JSON.stringify(updated));
+      } catch {}
+      return updated;
     });
   };
 
-  // Start Booking Flow
+  // Start Booking Flow (Bảo vệ: Bắt buộc đăng nhập trước khi tiến hành đặt tour)
   const handleStartBooking = (draft) => {
+    if (!authUser) {
+      showToast('Vui lòng đăng nhập để tiến hành đặt tour!');
+      setShowAuth(true);
+      return;
+    }
     setActiveTourDetail(null);
     setBookingDraft(draft);
   };
@@ -201,7 +277,7 @@ export default function App() {
     showToast(`Chúc mừng! Đặt tour thành công - Mã vé: ${newBooking.bookingCode}`);
   };
 
-  // Cancel Booking with Refund Policy
+  // Cancel Booking with Refund Policy & Cập nhật SQL Server
   const handleCancelBooking = (booking) => {
     const depDate = new Date(booking.departureDate);
     const now = new Date();
@@ -222,6 +298,16 @@ export default function App() {
       `Bạn có chắc chắn muốn hủy đơn hàng này không?`;
 
     if (window.confirm(confirmMsg)) {
+      // Gửi yêu cầu cập nhật hủy tới API & SQL Server
+      fetch(`/api/bookings/${booking.bookingCode || booking.id}/cancel`, { method: 'POST' })
+        .then((res) => res.json())
+        .then((data) => {
+          if (data.success) {
+            showToast('Yêu cầu hủy đơn và hoàn tiền đã được xử lý thành công.');
+          }
+        })
+        .catch(() => {});
+
       setBookings((prev) =>
         prev.map((b) =>
           b.id === booking.id
@@ -249,8 +335,6 @@ export default function App() {
           return t;
         })
       );
-
-      showToast('Yêu cầu hủy đơn và hoàn tiền đã được xử lý thành công.');
     }
   };
 
@@ -320,15 +404,39 @@ export default function App() {
         currentView={currentView}
         setCurrentView={setCurrentView}
         wishlistCount={wishlist.length}
-        openMyTrips={() => setShowMyTrips(true)}
+        openMyTrips={() => {
+          if (!authUser) {
+            showToast('Vui lòng đăng nhập để xem lịch sử chuyến đi của bạn!');
+            setShowAuth(true);
+            return;
+          }
+          setShowMyTrips(true);
+        }}
         openWishlist={() => {
-          setKeyword('');
-          setSelectedCategory('all');
+          if (!authUser) {
+            showToast('Vui lòng đăng nhập để xem danh sách tour yêu thích!');
+            setShowAuth(true);
+            return;
+          }
+          if (wishlist.length === 0) {
+            showToast('Danh sách yêu thích đang trống. Hãy nhấn thả tim ở các tour để lưu nhé!');
+            return;
+          }
+          setShowOnlyWishlist(true);
           showToast(`Đang hiển thị ${wishlist.length} tour trong danh sách yêu thích của bạn`);
+          const el = document.getElementById('catalog-section');
+          if (el) el.scrollIntoView({ behavior: 'smooth' });
         }}
         currentUser={currentUser}
         authUser={authUser}
-        openRoleModal={() => setShowRoleModal(true)}
+        openRoleModal={() => {
+          const role = authUser?.role || currentUser?.role;
+          if (role === 'SUPER_ADMIN' || role === 'ADMIN') {
+            setShowRoleModal(true);
+          } else {
+            showToast('Chỉ tài khoản Quản trị viên (Admin) mới có quyền truy cập bảng phân quyền');
+          }
+        }}
         openAuth={() => setShowAuth(true)}
         onLogout={handleLogout}
         showToast={showToast}
@@ -342,6 +450,7 @@ export default function App() {
             filters={filters}
             setFilters={setFilters}
             onSearch={() => {
+              setShowOnlyWishlist(false);
               const el = document.getElementById('catalog-section');
               if (el) el.scrollIntoView({ behavior: 'smooth' });
             }}
@@ -349,12 +458,42 @@ export default function App() {
 
           {/* Filter Bar & Tour Catalog */}
           <section id="catalog-section" className="container tours-grid-section">
+            {showOnlyWishlist && (
+              <div style={{
+                background: '#fff1f2',
+                border: '1px solid #fecdd3',
+                borderRadius: '12px',
+                padding: '12px 20px',
+                marginBottom: '18px',
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'center'
+              }}>
+                <span style={{ color: '#e11d48', fontWeight: '600', fontSize: '14px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <span>❤️</span> Đang xem danh sách yêu thích của bạn ({wishlist.length} tour)
+                </span>
+                <button
+                  className="btn btn-sm btn-outline"
+                  onClick={() => setShowOnlyWishlist(false)}
+                  style={{ fontSize: '13px', padding: '4px 14px', borderRadius: '8px' }}
+                >
+                  Xem tất cả tour
+                </button>
+              </div>
+            )}
+
             <FilterBar
               categories={categories}
               selectedCategory={selectedCategory}
-              setSelectedCategory={setSelectedCategory}
+              setSelectedCategory={(cat) => {
+                setShowOnlyWishlist(false);
+                setSelectedCategory(cat);
+              }}
               keyword={keyword}
-              setKeyword={setKeyword}
+              setKeyword={(kw) => {
+                setShowOnlyWishlist(false);
+                setKeyword(kw);
+              }}
               sortBy={sortBy}
               setSortBy={setSortBy}
               totalResults={sortedTours.length}
@@ -486,6 +625,7 @@ export default function App() {
           bookingDraft={bookingDraft}
           onClose={() => setBookingDraft(null)}
           onBookingSuccess={handleBookingSuccess}
+          authUser={authUser}
         />
       )}
 

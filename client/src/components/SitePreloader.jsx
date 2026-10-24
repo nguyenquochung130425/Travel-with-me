@@ -53,25 +53,10 @@ export function SitePreloader({ onDone }) {
 
   return (
     <div ref={rootRef} className="spl-root" aria-live="polite">
-      {/* Site preview behind curtain */}
-      <div className="spl-site">
-        <div className="spl-nv" data-s style={{ '--d': '.1s' }}>
-          <b>Travel With Me</b>
-          <span>
-            <span>Tour</span>
-            <span>Khám Phá</span>
-            <span>Liên Hệ</span>
-          </span>
-        </div>
-        <div className="spl-ph" data-s style={{ '--d': '.2s' }} aria-hidden="true"></div>
-        <h2 className="spl-hd" data-s style={{ '--d': '.38s' }}>
-          Khám phá kỳ quan<br />hành trình độc bản
-        </h2>
-        <p className="spl-sb" data-s style={{ '--d': '.52s' }}>Việt Nam · since 2026</p>
-      </div>
-
       {/* Curtain – top half */}
       <div className="spl-hf spl-a"></div>
+      {/* Curtain – bottom half */}
+      <div className="spl-hf spl-b"></div>
       {/* Curtain – bottom half */}
       <div className="spl-hf spl-b"></div>
 

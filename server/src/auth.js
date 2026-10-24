@@ -206,7 +206,7 @@ router.post('/login', async (req, res) => {
       .input('email', sql.NVarChar, email.trim().toLowerCase())
       .query(`
         SELECT u.user_id, u.full_name, u.email, u.password_hash,
-               u.auth_provider, u.is_active,
+               u.auth_provider, u.is_active, ISNULL(u.elo, 1000) AS elo,
                r.role_name
         FROM dbo.users u
         INNER JOIN dbo.roles r ON u.role_id = r.role_id
@@ -250,6 +250,7 @@ router.post('/login', async (req, res) => {
         fullName: user.full_name,
         email: user.email,
         role: user.role_name,
+        elo: user.elo ?? 1000,
         token
       }
     });
@@ -393,6 +394,7 @@ router.get('/me', requireAuth, async (req, res) => {
       .input('userId', sql.BigInt, req.user.userId)
       .query(`
         SELECT u.user_id, u.full_name, u.email, u.phone_number, u.avatar_url,
+               ISNULL(u.elo, 1000) AS elo,
                r.role_name
         FROM dbo.users u
         INNER JOIN dbo.roles r ON u.role_id = r.role_id
@@ -410,6 +412,7 @@ router.get('/me', requireAuth, async (req, res) => {
         email: u.email,
         phone: u.phone_number,
         avatar: u.avatar_url,
+        elo: u.elo ?? 1000,
         role: u.role_name
       }
     });

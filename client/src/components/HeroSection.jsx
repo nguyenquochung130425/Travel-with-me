@@ -1,6 +1,5 @@
 import React from 'react';
 import { Search, MapPin, Calendar, DollarSign, Compass, Star, ShieldCheck, Award } from 'lucide-react';
-import { CountUpPreloader } from './CountUpPreloader';
 
 export function HeroSection({ filters, setFilters, onSearch }) {
   const handleInputChange = (field, value) => {
@@ -12,36 +11,27 @@ export function HeroSection({ filters, setFilters, onSearch }) {
       <div className="hero-backdrop-glow"></div>
       
       <div className="container hero-content">
-        {/* Hero Top Layout with Title & Interactive Showcase Preloader */}
-        <div className="hero-banner-grid">
-          <div className="hero-banner-text">
-            {/* Badges on top */}
-            <div className="hero-top-badges animate-fade-in">
-              <span className="hero-pill">
-                <Award size={14} className="text-amber" />
-                <span>Nền tảng đặt tour trực tuyến số 1 Việt Nam</span>
-              </span>
-              <span className="hero-pill">
-                <ShieldCheck size={14} className="text-emerald" />
-                <span>Cam kết giữ chỗ 100% & Hoàn tiền linh hoạt</span>
-              </span>
-            </div>
-
-            {/* Main Title */}
-            <h1 className="hero-title animate-fade-in">
-              Khám Phá Vẻ Đẹp Việt Nam <br />
-              <span className="hero-title-gradient">Cùng Những Hành Trình Độc Bản</span>
-            </h1>
-            <p className="hero-subtitle animate-fade-in">
-              Tận hưởng kỳ nghỉ sang trọng trên du thuyền Hạ Long 5 sao, chạm tay vào đỉnh Fansipan hùng vĩ 
-              hay đắm mình trong làn nước ngọc bích Phú Quốc với ưu đãi tới 25%.
-            </p>
-          </div>
-
-          <div className="hero-banner-showcase animate-fade-in">
-            <CountUpPreloader />
-          </div>
+        {/* Badges on top */}
+        <div className="hero-top-badges animate-fade-in">
+          <span className="hero-pill">
+            <Award size={14} className="text-amber" />
+            <span>Nền tảng đặt tour trực tuyến số 1 Việt Nam</span>
+          </span>
+          <span className="hero-pill">
+            <ShieldCheck size={14} className="text-emerald" />
+            <span>Cam kết giữ chỗ 100% & Hoàn tiền linh hoạt</span>
+          </span>
         </div>
+
+        {/* Main Title */}
+        <h1 className="hero-title animate-fade-in">
+          Khám Phá Vẻ Đẹp Việt Nam <br />
+          <span className="hero-title-gradient">Cùng Những Hành Trình Độc Bản</span>
+        </h1>
+        <p className="hero-subtitle animate-fade-in">
+          Tận hưởng kỳ nghỉ sang trọng trên du thuyền Hạ Long 5 sao, chạm tay vào đỉnh Fansipan hùng vĩ 
+          hay đắm mình trong làn nước ngọc bích Phú Quốc với ưu đãi tới 25%.
+        </p>
 
         {/* Smart Multi-Filter Floating Box */}
         <div className="hero-filter-card glass-panel animate-fade-in">

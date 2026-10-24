@@ -16,6 +16,41 @@ function validatePw(pw) {
   return typeof pw === 'string' && pw.length >= 8 && /[a-zA-Z]/.test(pw) && /[0-9]/.test(pw);
 }
 
+// ─── Shared Sub-components (defined outside to avoid re-mounting on keystrokes) ─
+function Field({ icon: Icon, type = 'text', placeholder, value, onChange, right }) {
+  return (
+    <div className="auth-field">
+      {Icon && <Icon size={16} className="auth-field-icon" />}
+      <input
+        type={type}
+        placeholder={placeholder}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        className="auth-field-input"
+        autoComplete="off"
+      />
+      {right}
+    </div>
+  );
+}
+
+function PwToggle({ showPw, onToggle }) {
+  return (
+    <button type="button" className="auth-pw-toggle" onClick={onToggle} tabIndex={-1}>
+      {showPw ? <EyeOff size={16} /> : <Eye size={16} />}
+    </button>
+  );
+}
+
+function BtnPrimary({ loading, children }) {
+  return (
+    <button type="submit" className="auth-btn-primary" disabled={loading}>
+      {loading ? <Loader2 size={16} className="auth-spin" /> : null}
+      {children}
+    </button>
+  );
+}
+
 export function AuthModal({ isOpen, initialView = VIEW.LOGIN, onClose, onLoginSuccess }) {
   const [view, setView] = useState(initialView);
   const [loading, setLoading] = useState(false);
@@ -129,38 +164,6 @@ export function AuthModal({ isOpen, initialView = VIEW.LOGIN, onClose, onLoginSu
     }
   }
 
-  // ── Sub-renders ────────────────────────────────────────────────────────────
-  const Field = ({ icon: Icon, type = 'text', placeholder, value, onChange, right }) => (
-    <div className="auth-field">
-      <Icon size={16} className="auth-field-icon" />
-      <input
-        type={type}
-        placeholder={placeholder}
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        className="auth-field-input"
-        autoComplete="off"
-      />
-      {right}
-    </div>
-  );
-
-  const PwToggle = () => (
-    <button type="button" className="auth-pw-toggle" onClick={() => setShowPw((v) => !v)} tabIndex={-1}>
-      {showPw ? <EyeOff size={16} /> : <Eye size={16} />}
-    </button>
-  );
-
-  const ErrMsg = () => error ? <p className="auth-error">{error}</p> : null;
-  const OkMsg = () => success ? <p className="auth-success">{success}</p> : null;
-
-  const BtnPrimary = ({ children }) => (
-    <button type="submit" className="auth-btn-primary" disabled={loading}>
-      {loading ? <Loader2 size={16} className="auth-spin" /> : null}
-      {children}
-    </button>
-  );
-
   return (
     <div className="auth-overlay" onClick={(e) => e.target === e.currentTarget && onClose()}>
       <div className="auth-modal" role="dialog" aria-modal="true" aria-label="Xác thực tài khoản">
@@ -178,13 +181,13 @@ export function AuthModal({ isOpen, initialView = VIEW.LOGIN, onClose, onLoginSu
             </div>
             <div className="auth-fields">
               <Field icon={Mail} type="email" placeholder="Email của bạn" value={form.email} onChange={(v) => set('email', v)} />
-              <Field icon={Lock} type={showPw ? 'text' : 'password'} placeholder="Mật khẩu" value={form.password} onChange={(v) => set('password', v)} right={<PwToggle />} />
+              <Field icon={Lock} type={showPw ? 'text' : 'password'} placeholder="Mật khẩu" value={form.password} onChange={(v) => set('password', v)} right={<PwToggle showPw={showPw} onToggle={() => setShowPw((v) => !v)} />} />
             </div>
-            <ErrMsg />
+            {error && <p className="auth-error">{error}</p>}
             <button type="button" className="auth-link auth-forgot-link" onClick={() => resetState(VIEW.FORGOT)}>
               Quên mật khẩu?
             </button>
-            <BtnPrimary>Đăng nhập</BtnPrimary>
+            <BtnPrimary loading={loading}>Đăng nhập</BtnPrimary>
             <div className="auth-divider"><span>hoặc</span></div>
             <button type="button" className="auth-btn-oauth google" onClick={() => alert('OAuth Google sẽ được cấu hình với Google Cloud Console')}>
               <img src="https://www.svgrepo.com/show/475656/google-color.svg" alt="Google" width={18} />
@@ -208,11 +211,11 @@ export function AuthModal({ isOpen, initialView = VIEW.LOGIN, onClose, onLoginSu
             <div className="auth-fields">
               <Field icon={User} placeholder="Họ và tên đầy đủ" value={form.fullName} onChange={(v) => set('fullName', v)} />
               <Field icon={Mail} type="email" placeholder="Email của bạn" value={form.email} onChange={(v) => set('email', v)} />
-              <Field icon={Lock} type={showPw ? 'text' : 'password'} placeholder="Mật khẩu (min 8 ký tự, có chữ & số)" value={form.password} onChange={(v) => set('password', v)} right={<PwToggle />} />
+              <Field icon={Lock} type={showPw ? 'text' : 'password'} placeholder="Mật khẩu (min 8 ký tự, có chữ & số)" value={form.password} onChange={(v) => set('password', v)} right={<PwToggle showPw={showPw} onToggle={() => setShowPw((v) => !v)} />} />
               <Field icon={Lock} type={showPw ? 'text' : 'password'} placeholder="Xác nhận mật khẩu" value={form.confirmPassword} onChange={(v) => set('confirmPassword', v)} />
             </div>
-            <ErrMsg />
-            <BtnPrimary>Đăng ký tài khoản</BtnPrimary>
+            {error && <p className="auth-error">{error}</p>}
+            <BtnPrimary loading={loading}>Đăng ký tài khoản</BtnPrimary>
             <p className="auth-elo-badge">🏅 Tài khoản mới được cấp Elo khởi điểm: <strong>1000</strong></p>
             <p className="auth-switch">
               Đã có tài khoản?{' '}
@@ -235,9 +238,9 @@ export function AuthModal({ isOpen, initialView = VIEW.LOGIN, onClose, onLoginSu
             <div className="auth-fields">
               <Field icon={Mail} type="email" placeholder="Email đã đăng ký" value={form.email} onChange={(v) => set('email', v)} />
             </div>
-            <ErrMsg />
-            <OkMsg />
-            <BtnPrimary>Gửi link đặt lại mật khẩu</BtnPrimary>
+            {error && <p className="auth-error">{error}</p>}
+            {success && <p className="auth-success">{success}</p>}
+            <BtnPrimary loading={loading}>Gửi link đặt lại mật khẩu</BtnPrimary>
             {success && (
               <button type="button" className="auth-btn-secondary" onClick={() => resetState(VIEW.RESET)}>
                 Tôi đã nhận được token → Đặt lại mật khẩu
@@ -260,11 +263,11 @@ export function AuthModal({ isOpen, initialView = VIEW.LOGIN, onClose, onLoginSu
             <div className="auth-fields">
               <Field icon={Mail} type="email" placeholder="Email của bạn" value={form.email} onChange={(v) => set('email', v)} />
               <Field icon={Lock} placeholder="Token từ email (dán vào đây)" value={form.token} onChange={(v) => set('token', v)} />
-              <Field icon={Lock} type={showPw ? 'text' : 'password'} placeholder="Mật khẩu mới (min 8 ký tự, có chữ & số)" value={form.newPassword} onChange={(v) => set('newPassword', v)} right={<PwToggle />} />
+              <Field icon={Lock} type={showPw ? 'text' : 'password'} placeholder="Mật khẩu mới (min 8 ký tự, có chữ & số)" value={form.newPassword} onChange={(v) => set('newPassword', v)} right={<PwToggle showPw={showPw} onToggle={() => setShowPw((v) => !v)} />} />
               <Field icon={Lock} type={showPw ? 'text' : 'password'} placeholder="Xác nhận mật khẩu mới" value={form.confirmNew} onChange={(v) => set('confirmNew', v)} />
             </div>
-            <ErrMsg />
-            <BtnPrimary>Đặt lại mật khẩu</BtnPrimary>
+            {error && <p className="auth-error">{error}</p>}
+            <BtnPrimary loading={loading}>Đặt lại mật khẩu</BtnPrimary>
           </form>
         )}
 

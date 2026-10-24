@@ -8,7 +8,8 @@ import confetti from 'canvas-confetti';
 export function BookingModal({
   bookingDraft,
   onClose,
-  onBookingSuccess
+  onBookingSuccess,
+  authUser
 }) {
   const { tour, schedule, numAdults, numChildren, numInfants, totalPrice } = bookingDraft;
 
@@ -29,16 +30,16 @@ export function BookingModal({
   };
 
   // Contact Form
-  const [contactName, setContactName] = useState('Nguyễn Quốc Hùng');
-  const [contactPhone, setContactPhone] = useState('0912345678');
-  const [contactEmail, setContactEmail] = useState('hung.nguyen@example.com');
+  const [contactName, setContactName] = useState(authUser?.fullName || 'Nguyễn Quốc Hùng');
+  const [contactPhone, setContactPhone] = useState(authUser?.phone || '0912345678');
+  const [contactEmail, setContactEmail] = useState(authUser?.email || 'hung.nguyen@example.com');
   const [specialNotes, setSpecialNotes] = useState('');
 
   // Passengers list
   const totalPassengers = numAdults + numChildren + numInfants;
   const [passengers, setPassengers] = useState(
     Array.from({ length: totalPassengers }, (_, idx) => ({
-      fullName: idx === 0 ? 'Nguyễn Quốc Hùng' : '',
+      fullName: idx === 0 ? (authUser?.fullName || 'Nguyễn Quốc Hùng') : '',
       passengerType: idx < numAdults ? 'ADULT' : idx < numAdults + numChildren ? 'CHILD' : 'INFANT',
       gender: 'MALE',
       birthDate: idx === 0 ? '1995-04-25' : '',
@@ -97,58 +98,70 @@ export function BookingModal({
   const discountVal = appliedCoupon ? appliedCoupon.discountAmount : 0;
   const finalPaymentAmount = Math.max(0, totalPrice - discountVal);
 
-  // Handle Submit Booking
-  const handleSubmitBooking = () => {
-    if (!contactName || !contactPhone || !contactEmail) {
+  // Handle Submit Booking & Lưu vào SQL Server
+  const handleSubmitBooking = async () => {
+    if (!contactName.trim() || !contactPhone.trim() || !contactEmail.trim()) {
       alert('Vui lòng điền đầy đủ thông tin người liên hệ');
       return;
     }
 
     setIsSubmitting(true);
 
-    setTimeout(() => {
-      // Fire confetti celebration
-      try {
-        confetti({
-          particleCount: 100,
-          spread: 70,
-          origin: { y: 0.6 }
-        });
-      } catch (err) {
-        // ignore
+    const bookingPayload = {
+      userId: authUser?.userId || authUser?.id || 3,
+      tourId: tour.id,
+      tourTitle: tour.title,
+      tourImage: tour.thumbnailUrl || tour.image,
+      scheduleId: schedule.id,
+      departureDate: schedule.departureDate,
+      returnDate: schedule.returnDate,
+      numAdults,
+      numChildren,
+      numInfants,
+      totalPassengers,
+      baseAmount: totalPrice,
+      discountAmount: discountVal,
+      finalAmount: finalPaymentAmount,
+      contactName,
+      contactEmail,
+      contactPhone,
+      specialNotes,
+      passengers,
+      paymentMethod,
+      couponCode: appliedCoupon ? appliedCoupon.code : null
+    };
+
+    try {
+      const res = await fetch('/api/bookings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(bookingPayload)
+      });
+
+      const json = await res.json();
+      if (json.success && json.data) {
+        // Fire confetti celebration
+        try {
+          confetti({
+            particleCount: 100,
+            spread: 70,
+            origin: { y: 0.6 }
+          });
+        } catch {
+          // ignore
+        }
+
+        setIsSubmitting(false);
+        onBookingSuccess(json.data);
+      } else {
+        setIsSubmitting(false);
+        alert(json.message || 'Đặt tour không thành công. Vui lòng thử lại!');
       }
-
-      const randomCode = `TWM-${new Date().toISOString().slice(0, 10).replace(/-/g, '')}-${Math.floor(1000 + Math.random() * 9000)}`;
-      const completedBooking = {
-        id: `bk-${Date.now()}`,
-        bookingCode: randomCode,
-        tourId: tour.id,
-        tourTitle: tour.title,
-        tourImage: tour.thumbnailUrl,
-        departureDate: schedule.departureDate,
-        returnDate: schedule.returnDate,
-        numAdults,
-        numChildren,
-        numInfants,
-        totalPassengers,
-        baseAmount: totalPrice,
-        discountAmount: discountVal,
-        finalAmount: finalPaymentAmount,
-        contactName,
-        contactEmail,
-        contactPhone,
-        specialNotes,
-        passengers,
-        paymentMethod,
-        paymentStatus: paymentMethod === 'CASH' ? 'PENDING' : 'PAID',
-        status: paymentMethod === 'CASH' ? 'PENDING_PAYMENT' : 'CONFIRMED',
-        qrCodeToken: `QR-${randomCode}-AUTHENTIC`,
-        createdAt: new Date().toISOString()
-      };
-
+    } catch (err) {
+      console.error('Lỗi khi gửi yêu cầu đặt tour:', err);
       setIsSubmitting(false);
-      onBookingSuccess(completedBooking);
-    }, 1200);
+      alert('Không thể kết nối máy chủ để đặt tour. Vui lòng thử lại!');
+    }
   };
 
   return (

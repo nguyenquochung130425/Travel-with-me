@@ -81,8 +81,29 @@ export function MyTripsModal({
         {/* Trips List Body */}
         <div className="mytrips-body">
           {filteredBookings.length === 0 ? (
-            <div className="empty-trips-view">
-              <p>Chưa có chuyến đi nào trong mục này.</p>
+            <div className="empty-trips-view" style={{ textAlign: 'center', padding: '48px 20px' }}>
+              <div style={{ fontSize: '42px', marginBottom: '14px' }}>✈️</div>
+              <h4 style={{ fontSize: '17px', fontWeight: '600', marginBottom: '8px', color: '#1e293b' }}>
+                {activeTab === 'all' ? 'Bạn chưa có chuyến đi nào' : 'Không có chuyến đi nào trong mục này'}
+              </h4>
+              <p style={{ color: '#64748b', fontSize: '14px', maxWidth: '380px', margin: '0 auto 20px', lineHeight: '1.5' }}>
+                {activeTab === 'all'
+                  ? 'Lịch sử chuyến đi sẽ xuất hiện tại đây sau khi bạn đặt tour thành công trên hệ thống.'
+                  : 'Hãy kiểm tra các tab khác hoặc đặt thêm các hành trình khám phá mới nhé.'}
+              </p>
+              {activeTab === 'all' && (
+                <button
+                  className="btn btn-primary"
+                  onClick={() => {
+                    onClose();
+                    const el = document.getElementById('catalog-section');
+                    if (el) el.scrollIntoView({ behavior: 'smooth' });
+                  }}
+                  style={{ display: 'inline-flex', alignItems: 'center', gap: '8px', margin: '0 auto' }}
+                >
+                  <span>Khám Phá Tour Ngay</span>
+                </button>
+              )}
             </div>
           ) : (
             <div className="trips-cards-list">

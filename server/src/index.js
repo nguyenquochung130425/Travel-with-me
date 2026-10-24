@@ -22,9 +22,52 @@ app.use('/api/auth', authRouter);
 
 // In-memory data store for live state changes
 let toursData = JSON.parse(JSON.stringify(mockTours));
-let bookingsData = JSON.parse(JSON.stringify(mockUserBookings));
+let bookingsData = [];
 let reviewsData = JSON.parse(JSON.stringify(mockReviews));
 let couponsData = JSON.parse(JSON.stringify(mockCoupons));
+
+// Khởi tạo và nạp dữ liệu từ SQL Server dbo.bookings nếu có
+getDbPool().then(async (pool) => {
+  if (pool) {
+    try {
+      const res = await pool.request().query('SELECT * FROM dbo.bookings ORDER BY created_at DESC');
+      if (res.recordset && res.recordset.length > 0) {
+        bookingsData = res.recordset.map((row) => ({
+          id: `bk-${row.booking_id}`,
+          bookingId: row.booking_id,
+          bookingCode: row.booking_code,
+          userId: row.user_id,
+          tourId: row.tour_id,
+          tourTitle: row.tour_title,
+          tourImage: row.tour_image,
+          scheduleId: row.schedule_id ? `sch-${row.schedule_id}` : null,
+          departureDate: row.departure_date,
+          returnDate: row.return_date,
+          numAdults: row.num_adults,
+          numChildren: row.num_children,
+          numInfants: row.num_infants,
+          totalPassengers: (row.num_adults || 0) + (row.num_children || 0) + (row.num_infants || 0),
+          baseAmount: Number(row.subtotal),
+          discountAmount: Number(row.discount_amount),
+          finalAmount: Number(row.total_amount),
+          paymentMethod: row.payment_method,
+          paymentStatus: row.payment_status,
+          status: row.booking_status,
+          contactName: row.contact_name,
+          contactEmail: row.contact_email,
+          contactPhone: row.contact_phone,
+          specialNotes: row.special_requests,
+          passengers: row.passengers_json ? JSON.parse(row.passengers_json) : [],
+          qrCodeToken: row.qr_ticket_code,
+          createdAt: row.created_at
+        }));
+        console.log(`[SQL Server] Đã nạp ${bookingsData.length} đơn đặt tour từ database TravelWithMe`);
+      }
+    } catch (e) {
+      console.error('[SQL Server] Lỗi nạp bookings ban đầu:', e.message);
+    }
+  }
+}).catch(() => {});
 
 // 1. Lấy danh sách danh mục
 app.get('/api/categories', (req, res) => {
@@ -190,127 +233,277 @@ app.post('/api/coupons/validate', (req, res) => {
   });
 });
 
-// 5. Đặt tour (Booking Creation & Concurrency Check)
-app.post('/api/bookings', (req, res) => {
-  const {
-    tourId,
-    scheduleId,
-    numAdults,
-    numChildren,
-    numInfants,
-    contactName,
-    contactEmail,
-    contactPhone,
-    specialNotes,
-    couponCode,
-    paymentMethod,
-    passengers
-  } = req.body;
+// 5. Đặt tour (Booking Creation & Concurrency Check & Lưu vào SQL Server)
+app.post('/api/bookings', async (req, res) => {
+  try {
+    const {
+      userId,
+      tourId,
+      scheduleId,
+      numAdults,
+      numChildren,
+      numInfants,
+      contactName,
+      contactEmail,
+      contactPhone,
+      specialNotes,
+      couponCode,
+      paymentMethod,
+      passengers,
+      baseAmount: clientBaseAmount,
+      discountAmount: clientDiscountAmount,
+      finalAmount: clientFinalAmount
+    } = req.body;
 
-  // Tìm tour & schedule
-  const tour = toursData.find((t) => t.id === tourId);
-  if (!tour) {
-    return res.status(404).json({ success: false, message: 'Tour không tồn tại' });
+    if (!userId) {
+      return res.status(401).json({
+        success: false,
+        message: 'Vui lòng đăng nhập tài khoản để tiến hành đặt tour!'
+      });
+    }
+
+    // Tìm tour & schedule
+    const tour = toursData.find((t) => t.id === tourId) || toursData[0];
+    if (!tour) {
+      return res.status(404).json({ success: false, message: 'Tour không tồn tại' });
+    }
+
+    const schedule = (tour.schedules && tour.schedules.find((s) => s.id === scheduleId)) || (tour.schedules && tour.schedules[0]) || {
+      id: 'sch-default',
+      departureDate: new Date(Date.now() + 86400000 * 3).toISOString().slice(0, 10),
+      returnDate: new Date(Date.now() + 86400000 * 5).toISOString().slice(0, 10),
+      adultPrice: tour.adultPrice || 3500000,
+      childPrice: tour.childPrice || 2500000,
+      infantPrice: 0,
+      bookedSlots: 0,
+      maxCapacity: 30
+    };
+
+    const adultCount = Number(numAdults) || 1;
+    const childCount = Number(numChildren) || 0;
+    const infantCount = Number(numInfants) || 0;
+    const totalSeatsNeeded = adultCount + childCount; // Trẻ sơ sinh thường không chiếm ghế riêng
+
+    // KIỂM SOÁT OVERBOOKING REALTIME
+    if (schedule && schedule.maxCapacity) {
+      const availableSlots = schedule.maxCapacity - (schedule.bookedSlots || 0);
+      if (availableSlots < totalSeatsNeeded) {
+        return res.status(400).json({
+          success: false,
+          message: `Rất tiếc! Tour này chỉ còn ${availableSlots} chỗ trống, không đủ cho ${totalSeatsNeeded} hành khách.`
+        });
+      }
+      schedule.bookedSlots = (schedule.bookedSlots || 0) + totalSeatsNeeded;
+      if (schedule.bookedSlots >= schedule.maxCapacity) {
+        schedule.status = 'SOLD_OUT';
+      }
+    }
+
+    // Tính tiền
+    const baseAmount = clientBaseAmount || (
+      adultCount * (schedule.adultPrice || 0) +
+      childCount * (schedule.childPrice || 0) +
+      infantCount * (schedule.infantPrice || 0)
+    );
+
+    let discountAmount = clientDiscountAmount || 0;
+    if (couponCode && !clientDiscountAmount) {
+      const coupon = couponsData.find(
+        (c) => c.code.toUpperCase() === couponCode.toUpperCase().trim() && c.isActive
+      );
+      if (coupon && baseAmount >= coupon.minOrder) {
+        if (coupon.discountType === 'PERCENTAGE') {
+          discountAmount = (baseAmount * coupon.discountValue) / 100;
+          if (coupon.maxDiscount && discountAmount > coupon.maxDiscount) {
+            discountAmount = coupon.maxDiscount;
+          }
+        } else {
+          discountAmount = coupon.discountValue;
+        }
+      }
+    }
+
+    const finalAmount = clientFinalAmount || Math.max(0, baseAmount - discountAmount);
+
+    const randomSuffix = Math.floor(1000 + Math.random() * 9000);
+    const bookingCode = `TWM-${new Date().toISOString().slice(0, 10).replace(/-/g, '')}-${randomSuffix}`;
+    const qrTicketCode = `QR-${bookingCode}-VERIFIED`;
+    const departureDate = schedule.departureDate || new Date().toISOString().slice(0, 10);
+    const returnDate = schedule.returnDate || new Date().toISOString().slice(0, 10);
+    const paymentStatus = paymentMethod === 'CASH' ? 'PENDING' : 'PAID';
+    const status = paymentMethod === 'CASH' ? 'PENDING_PAYMENT' : 'CONFIRMED';
+    const passengersJson = JSON.stringify(passengers || []);
+
+    let dbBookingId = null;
+
+    // Lưu trực tiếp vào Microsoft SQL Server (TravelWithMe.dbo.bookings)
+    try {
+      const pool = await getDbPool();
+      if (pool) {
+        const cleanScheduleId = scheduleId && !isNaN(Number(String(scheduleId).replace(/\D/g, '')))
+          ? Number(String(scheduleId).replace(/\D/g, ''))
+          : null;
+
+        const result = await pool.request()
+          .input('bookingCode', bookingCode)
+          .input('userId', Number(userId))
+          .input('scheduleId', cleanScheduleId)
+          .input('numAdults', adultCount)
+          .input('numChildren', childCount)
+          .input('numInfants', infantCount)
+          .input('subtotal', baseAmount)
+          .input('discountAmount', discountAmount)
+          .input('totalAmount', finalAmount)
+          .input('bookingStatus', status)
+          .input('paymentStatus', paymentStatus)
+          .input('qrTicketCode', qrTicketCode)
+          .input('specialRequests', specialNotes || '')
+          .input('tourId', tour.id || tourId)
+          .input('tourTitle', tour.title)
+          .input('tourImage', tour.thumbnailUrl || tour.image || '')
+          .input('departureDate', departureDate)
+          .input('returnDate', returnDate)
+          .input('contactName', contactName || '')
+          .input('contactEmail', contactEmail || '')
+          .input('contactPhone', contactPhone || '')
+          .input('paymentMethod', paymentMethod || 'VNPAY')
+          .input('passengersJson', passengersJson)
+          .query(`
+            INSERT INTO dbo.bookings (
+              booking_code, user_id, schedule_id, num_adults, num_children, num_infants,
+              subtotal, discount_amount, total_amount, booking_status, payment_status,
+              qr_ticket_code, special_requests, tour_id, tour_title, tour_image,
+              departure_date, return_date, contact_name, contact_email, contact_phone,
+              payment_method, passengers_json, created_at, updated_at
+            )
+            OUTPUT INSERTED.booking_id
+            VALUES (
+              @bookingCode, @userId, @scheduleId, @numAdults, @numChildren, @numInfants,
+              @subtotal, @discountAmount, @totalAmount, @bookingStatus, @paymentStatus,
+              @qrTicketCode, @specialRequests, @tourId, @tourTitle, @tourImage,
+              @departureDate, @returnDate, @contactName, @contactEmail, @contactPhone,
+              @paymentMethod, @passengersJson, GETDATE(), GETDATE()
+            )
+          `);
+
+        if (result.recordset && result.recordset.length > 0) {
+          dbBookingId = result.recordset[0].booking_id;
+        }
+      }
+    } catch (sqlErr) {
+      console.error('[SQL Server] Lỗi lưu booking vào dbo.bookings:', sqlErr.message);
+    }
+
+    const newBooking = {
+      id: dbBookingId ? `bk-${dbBookingId}` : `bk-${Date.now()}`,
+      bookingId: dbBookingId,
+      bookingCode,
+      userId: Number(userId),
+      tourId: tour.id,
+      tourTitle: tour.title,
+      tourImage: tour.thumbnailUrl || tour.image || '',
+      scheduleId: schedule.id,
+      departureDate,
+      returnDate,
+      numAdults: adultCount,
+      numChildren: childCount,
+      numInfants: infantCount,
+      totalPassengers: adultCount + childCount + infantCount,
+      baseAmount,
+      discountAmount,
+      finalAmount,
+      paymentMethod: paymentMethod || 'VNPAY',
+      paymentStatus,
+      status,
+      contactName,
+      contactEmail,
+      contactPhone,
+      specialNotes: specialNotes || '',
+      passengers: passengers || [],
+      qrCodeToken: qrTicketCode,
+      createdAt: new Date().toISOString()
+    };
+
+    bookingsData.unshift(newBooking);
+
+    return res.status(201).json({
+      success: true,
+      message: 'Đặt tour thành công!',
+      data: newBooking
+    });
+  } catch (err) {
+    console.error('[POST /api/bookings] Lỗi:', err);
+    return res.status(500).json({ success: false, message: 'Lỗi xử lý đặt tour: ' + err.message });
   }
+});
 
-  const schedule = tour.schedules.find((s) => s.id === scheduleId);
-  if (!schedule) {
-    return res.status(404).json({ success: false, message: 'Lịch khởi hành không tồn tại' });
-  }
+// 6. Lấy danh sách chuyến đi của khách hàng (Được lọc theo userId từ SQL Server)
+app.get('/api/bookings/my-trips', async (req, res) => {
+  const userId = req.query.userId || req.headers['x-user-id'];
 
-  const adultCount = Number(numAdults) || 1;
-  const childCount = Number(numChildren) || 0;
-  const infantCount = Number(numInfants) || 0;
-  const totalSeatsNeeded = adultCount + childCount; // Trẻ sơ sinh thường không chiếm ghế riêng
-
-  // KIỂM SOÁT OVERBOOKING REALTIME
-  const availableSlots = schedule.maxCapacity - schedule.bookedSlots;
-  if (availableSlots < totalSeatsNeeded) {
-    return res.status(400).json({
-      success: false,
-      message: `Rất tiếc! Tour này chỉ còn ${availableSlots} chỗ trống, không đủ cho ${totalSeatsNeeded} hành khách.`
+  // Nếu không có tài khoản đăng nhập, trả về danh sách rỗng []
+  if (!userId) {
+    return res.json({
+      success: true,
+      data: []
     });
   }
 
-  // Tính tiền
-  const baseAmount =
-    adultCount * schedule.adultPrice +
-    childCount * schedule.childPrice +
-    infantCount * schedule.infantPrice;
+  try {
+    const pool = await getDbPool();
+    if (pool) {
+      const result = await pool.request()
+        .input('userId', Number(userId))
+        .query(`
+          SELECT * FROM dbo.bookings
+          WHERE user_id = @userId
+          ORDER BY created_at DESC
+        `);
 
-  let discountAmount = 0;
-  if (couponCode) {
-    const coupon = couponsData.find(
-      (c) => c.code.toUpperCase() === couponCode.toUpperCase().trim() && c.isActive
-    );
-    if (coupon && baseAmount >= coupon.minOrder) {
-      if (coupon.discountType === 'PERCENTAGE') {
-        discountAmount = (baseAmount * coupon.discountValue) / 100;
-        if (coupon.maxDiscount && discountAmount > coupon.maxDiscount) {
-          discountAmount = coupon.maxDiscount;
-        }
-      } else {
-        discountAmount = coupon.discountValue;
-      }
+      const formattedTrips = result.recordset.map((row) => ({
+        id: `bk-${row.booking_id}`,
+        bookingId: row.booking_id,
+        bookingCode: row.booking_code,
+        userId: row.user_id,
+        tourId: row.tour_id,
+        tourTitle: row.tour_title,
+        tourImage: row.tour_image,
+        scheduleId: row.schedule_id ? `sch-${row.schedule_id}` : null,
+        departureDate: row.departure_date,
+        returnDate: row.return_date,
+        numAdults: row.num_adults,
+        numChildren: row.num_children,
+        numInfants: row.num_infants,
+        totalPassengers: (row.num_adults || 0) + (row.num_children || 0) + (row.num_infants || 0),
+        baseAmount: Number(row.subtotal),
+        discountAmount: Number(row.discount_amount),
+        finalAmount: Number(row.total_amount),
+        paymentMethod: row.payment_method,
+        paymentStatus: row.payment_status,
+        status: row.booking_status,
+        contactName: row.contact_name,
+        contactEmail: row.contact_email,
+        contactPhone: row.contact_phone,
+        specialNotes: row.special_requests,
+        passengers: row.passengers_json ? JSON.parse(row.passengers_json) : [],
+        qrCodeToken: row.qr_ticket_code,
+        createdAt: row.created_at
+      }));
+
+      return res.json({
+        success: true,
+        data: formattedTrips
+      });
     }
+  } catch (sqlErr) {
+    console.error('[SQL Server] Lỗi truy vấn my-trips:', sqlErr.message);
   }
 
-  const finalAmount = Math.max(0, baseAmount - discountAmount);
-
-  // Cập nhật số chỗ trống (Inventory)
-  schedule.bookedSlots += totalSeatsNeeded;
-  if (schedule.bookedSlots >= schedule.maxCapacity) {
-    schedule.status = 'SOLD_OUT';
-  }
-
-  const bookingId = `bk-${Date.now()}`;
-  const randomSuffix = Math.floor(1000 + Math.random() * 9000);
-  const bookingCode = `TWM-${new Date().toISOString().slice(0, 10).replace(/-/g, '')}-${randomSuffix}`;
-  const qrCodeToken = `QR-${bookingCode}-VERIFIED`;
-
-  const newBooking = {
-    id: bookingId,
-    bookingCode,
-    tourId: tour.id,
-    tourTitle: tour.title,
-    tourImage: tour.thumbnailUrl,
-    scheduleId: schedule.id,
-    departureDate: schedule.departureDate,
-    returnDate: schedule.returnDate,
-    numAdults: adultCount,
-    numChildren: childCount,
-    numInfants: infantCount,
-    totalPassengers: adultCount + childCount + infantCount,
-    baseAmount,
-    discountAmount,
-    finalAmount,
-    paymentMethod: paymentMethod || 'VNPAY',
-    paymentStatus: paymentMethod === 'CASH' ? 'PENDING' : 'PAID',
-    status: paymentMethod === 'CASH' ? 'PENDING_PAYMENT' : 'CONFIRMED',
-    contactName,
-    contactEmail,
-    contactPhone,
-    specialNotes: specialNotes || '',
-    passengers: passengers || [],
-    qrCodeToken,
-    createdAt: new Date().toISOString(),
-    expiresAt: new Date(Date.now() + 15 * 60 * 1000).toISOString()
-  };
-
-  bookingsData.unshift(newBooking);
-
-  res.status(201).json({
+  // Fallback: Lọc từ in-memory theo đúng userId của tài khoản đó
+  const userBookings = bookingsData.filter((b) => String(b.userId) === String(userId));
+  return res.json({
     success: true,
-    message: 'Đặt tour thành công!',
-    data: newBooking
-  });
-});
-
-// 6. Lấy danh sách chuyến đi của khách hàng
-app.get('/api/bookings/my-trips', (req, res) => {
-  res.json({
-    success: true,
-    data: bookingsData
+    data: userBookings
   });
 });
 
@@ -325,9 +518,9 @@ app.get('/api/bookings/:id', (req, res) => {
   res.json({ success: true, data: booking });
 });
 
-// 8. Hủy tour & Tính toán hoàn tiền
-app.post('/api/bookings/:id/cancel', (req, res) => {
-  const booking = bookingsData.find((b) => b.id === req.params.id);
+// 8. Hủy tour & Tính toán hoàn tiền (Cập nhật SQL Server & bộ nhớ)
+app.post('/api/bookings/:id/cancel', async (req, res) => {
+  const booking = bookingsData.find((b) => b.id === req.params.id || b.bookingCode === req.params.id);
   if (!booking) {
     return res.status(404).json({ success: false, message: 'Không tìm thấy đơn đặt tour' });
   }
@@ -364,6 +557,23 @@ app.post('/api/bookings/:id/cancel', (req, res) => {
   booking.status = refundPercent > 0 ? 'REFUNDED' : 'CANCELLED';
   booking.refundAmount = refundAmount;
   booking.penaltyPercent = penaltyPercent;
+
+  // Cập nhật vào SQL Server
+  try {
+    const pool = await getDbPool();
+    if (pool) {
+      await pool.request()
+        .input('code', booking.bookingCode)
+        .input('status', booking.status)
+        .query(`
+          UPDATE dbo.bookings 
+          SET booking_status = @status, updated_at = GETDATE()
+          WHERE booking_code = @code
+        `);
+    }
+  } catch (sqlErr) {
+    console.error('[SQL Server] Lỗi cập nhật hủy booking:', sqlErr.message);
+  }
 
   // Hoàn trả lại số chỗ trống (Inventory)
   const tour = toursData.find((t) => t.id === booking.tourId);
