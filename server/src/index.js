@@ -1,8 +1,8 @@
 import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
-import { getDbPool } from './db.js';
-import authRouter from './auth.js';
+import { getDbPool, sql } from './db.js';
+import authRouter, { requireAdmin } from './auth.js';
 import {
   mockCategories,
   mockTours,
@@ -25,6 +25,376 @@ let toursData = JSON.parse(JSON.stringify(mockTours));
 let bookingsData = [];
 let reviewsData = JSON.parse(JSON.stringify(mockReviews));
 let couponsData = JSON.parse(JSON.stringify(mockCoupons));
+
+function createSlug(value) {
+  return value
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[đĐ]/g, 'd')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-|-$/g, '');
+}
+
+function mapSqlTourRows(tourRows, scheduleRows, imageRows, itineraryRows) {
+  return tourRows.map((row) => ({
+    id: `dbtour-${row.tour_id}`,
+    source: 'database',
+    title: row.title,
+    slug: row.slug,
+    categoryId: `dbcat-${row.category_id}`,
+    categoryName: row.category_name,
+    departureCity: row.departure_location,
+    destinationCity: row.destination_name,
+    durationDays: row.duration_days,
+    durationNights: row.duration_nights,
+    transportType: row.transportation,
+    tourType: row.tour_type,
+    ratingAverage: Number(row.rating_avg),
+    reviewCount: row.total_reviews,
+    isFeatured: Boolean(row.is_featured),
+    isActive: Boolean(row.is_active),
+    thumbnailUrl: row.thumbnail_url || '',
+    albumImages: imageRows
+      .filter((image) => image.tour_id === row.tour_id)
+      .map((image) => image.image_url),
+    overviewDescription: row.overview_description || '',
+    inclusions: row.inclusions || '',
+    exclusions: row.exclusions || '',
+    cancellationPolicy: row.cancellation_policy || '',
+    schedules: scheduleRows
+      .filter((schedule) => schedule.tour_id === row.tour_id)
+      .map((schedule) => ({
+        id: `dbsch-${schedule.schedule_id}`,
+        departureDate: schedule.departure_date.toISOString().slice(0, 10),
+        returnDate: schedule.return_date.toISOString().slice(0, 10),
+        adultPrice: Number(schedule.adult_price),
+        childPrice: Number(schedule.child_price),
+        infantPrice: Number(schedule.infant_price),
+        maxCapacity: schedule.max_capacity,
+        minCapacity: schedule.min_capacity,
+        bookedSlots: schedule.booked_slots,
+        status: schedule.status
+      })),
+    itineraries: itineraryRows
+      .filter((itinerary) => itinerary.tour_id === row.tour_id)
+      .map((itinerary) => ({
+        dayNumber: itinerary.day_number,
+        title: itinerary.day_title,
+        description: itinerary.description,
+        activities: itinerary.activities ? JSON.parse(itinerary.activities) : [],
+        meals: itinerary.meals || '',
+        hotel: itinerary.hotel || ''
+      }))
+  }));
+}
+
+async function getSqlTours(includeInactive = false) {
+  const pool = await getDbPool();
+  const tourResult = await pool.request()
+    .input('includeInactive', sql.Bit, includeInactive)
+    .query(`
+      SELECT t.tour_id, t.title, t.slug, t.category_id, c.category_name,
+             t.destination_id, d.destination_name, t.duration_days, t.duration_nights,
+             t.departure_location, t.transportation, t.inclusions, t.exclusions,
+             t.cancellation_policy, t.thumbnail_url, t.rating_avg, t.total_reviews,
+             t.is_active, t.overview_description, t.tour_type, t.is_featured
+      FROM dbo.tours t
+      INNER JOIN dbo.categories c ON c.category_id = t.category_id
+      INNER JOIN dbo.destinations d ON d.destination_id = t.destination_id
+      WHERE @includeInactive = 1 OR t.is_active = 1
+      ORDER BY t.created_at DESC;
+    `);
+
+  if (tourResult.recordset.length === 0) return [];
+
+  const ids = tourResult.recordset.map((tour) => tour.tour_id);
+  const tourIdList = ids.map((_, index) => `@tourId${index}`).join(', ');
+  const bindTourIds = (request) => {
+    ids.forEach((id, index) => request.input(`tourId${index}`, sql.BigInt, id));
+    return request;
+  };
+  const [scheduleResult, imageResult, itineraryResult] = await Promise.all([
+    bindTourIds(pool.request())
+      .query(`
+        SELECT s.schedule_id, s.tour_id, s.departure_date, s.return_date,
+               s.adult_price, s.child_price, s.infant_price, s.max_capacity,
+               s.min_capacity, s.booked_slots, s.status
+        FROM dbo.tour_schedules s
+        WHERE s.tour_id IN (${tourIdList});
+      `),
+    bindTourIds(pool.request())
+      .query(`
+        SELECT image_id, tour_id, image_url
+        FROM dbo.tour_images
+        WHERE tour_id IN (${tourIdList})
+        ORDER BY image_id;
+      `),
+    bindTourIds(pool.request())
+      .query(`
+        SELECT itinerary_id, tour_id, day_number, day_title, description, activities, meals, hotel
+        FROM dbo.tour_itineraries
+        WHERE tour_id IN (${tourIdList})
+        ORDER BY day_number;
+      `)
+  ]);
+
+  return mapSqlTourRows(
+    tourResult.recordset,
+    scheduleResult.recordset,
+    imageResult.recordset,
+    itineraryResult.recordset
+  );
+}
+
+function validateTourPayload(body) {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    return 'Dữ liệu tour không hợp lệ';
+  }
+  const requiredText = [
+    'title', 'categoryName', 'destinationCity', 'departureCity',
+    'transportType', 'overviewDescription', 'thumbnailUrl'
+  ];
+  if (requiredText.some((key) => typeof body[key] !== 'string' || !body[key].trim())) {
+    return 'Vui lòng nhập đầy đủ tên tour, danh mục, điểm đến, điểm khởi hành, phương tiện, mô tả và ảnh đại diện';
+  }
+  if (body.title.trim().length > 200 || body.categoryName.trim().length > 100 ||
+      body.destinationCity.trim().length > 100 || body.departureCity.trim().length > 150 ||
+      body.thumbnailUrl.trim().length > 500) {
+    return 'Một số nội dung vượt quá giới hạn độ dài cho phép';
+  }
+  if (!['BUS', 'PLANE', 'TRAIN', 'MIXED'].includes(body.transportType) ||
+      !['RESORT', 'TREKKING', 'CULTURAL', 'FOOD', 'FAMILY'].includes(body.tourType || 'RESORT')) {
+    return 'Phương tiện hoặc loại hình tour không hợp lệ';
+  }
+  if (!Number.isInteger(Number(body.durationDays)) || Number(body.durationDays) < 1 ||
+      !Number.isInteger(Number(body.durationNights)) || Number(body.durationNights) < 0) {
+    return 'Thời lượng tour không hợp lệ';
+  }
+  if (!Array.isArray(body.schedules) || body.schedules.length === 0) {
+    return 'Tour cần có ít nhất một lịch khởi hành';
+  }
+  for (const schedule of body.schedules) {
+    const departureDate = new Date(schedule.departureDate);
+    const returnDate = new Date(schedule.returnDate);
+    if (!schedule.departureDate || !schedule.returnDate ||
+        Number.isNaN(departureDate.getTime()) || Number.isNaN(returnDate.getTime()) ||
+        returnDate < departureDate ||
+        !Number.isFinite(Number(schedule.adultPrice)) || Number(schedule.adultPrice) < 0 ||
+        !Number.isFinite(Number(schedule.childPrice)) || Number(schedule.childPrice) < 0 ||
+        !Number.isFinite(Number(schedule.infantPrice)) || Number(schedule.infantPrice) < 0 ||
+        !Number.isInteger(Number(schedule.maxCapacity)) || Number(schedule.maxCapacity) < 1 ||
+        !Number.isInteger(Number(schedule.minCapacity)) || Number(schedule.minCapacity) < 0 ||
+        Number(schedule.minCapacity) > Number(schedule.maxCapacity)) {
+      return 'Thông tin lịch khởi hành, giá hoặc sức chứa không hợp lệ';
+    }
+  }
+  if (body.albumImages !== undefined &&
+      (!Array.isArray(body.albumImages) || body.albumImages.some((image) => typeof image !== 'string' || image.length > 500))) {
+    return 'Danh sách ảnh tour không hợp lệ';
+  }
+  if (body.itineraries !== undefined) {
+    if (!Array.isArray(body.itineraries)) return 'Lịch trình tour không hợp lệ';
+    const days = new Set();
+    for (const itinerary of body.itineraries) {
+      const dayNumber = Number(itinerary.dayNumber);
+      if (!Number.isInteger(dayNumber) || dayNumber < 1 ||
+          dayNumber > Number(body.durationDays) ||
+          typeof itinerary.title !== 'string' || !itinerary.title.trim() || itinerary.title.length > 200 ||
+          typeof itinerary.description !== 'string' || !itinerary.description.trim() ||
+          (itinerary.activities !== undefined &&
+            (!Array.isArray(itinerary.activities) || itinerary.activities.some((activity) => typeof activity !== 'string'))) ||
+          days.has(dayNumber)) {
+        return 'Thông tin ngày trong lịch trình không hợp lệ hoặc bị trùng';
+      }
+      days.add(dayNumber);
+    }
+  }
+  return null;
+}
+
+async function ensureCategoryAndDestination(transaction, body) {
+  const categoryName = body.categoryName.trim();
+  const destinationName = body.destinationCity.trim();
+  const category = await new sql.Request(transaction)
+    .input('categoryName', sql.NVarChar(100), categoryName)
+    .query(`
+      SELECT category_id FROM dbo.categories WHERE category_name = @categoryName;
+    `);
+  let categoryId = category.recordset[0]?.category_id;
+  if (!categoryId) {
+    const categorySlug = createSlug(categoryName);
+    const inserted = await new sql.Request(transaction)
+      .input('categoryName', sql.NVarChar(100), categoryName)
+      .input('categorySlug', sql.VarChar(120), `${categorySlug}-${Date.now().toString(36)}`)
+      .query(`
+        INSERT INTO dbo.categories (category_name, slug)
+        OUTPUT INSERTED.category_id
+        VALUES (@categoryName, @categorySlug);
+      `);
+    categoryId = inserted.recordset[0].category_id;
+  }
+
+  const destination = await new sql.Request(transaction)
+    .input('destinationName', sql.NVarChar(100), destinationName)
+    .query(`
+      SELECT TOP 1 destination_id FROM dbo.destinations
+      WHERE destination_name = @destinationName ORDER BY destination_id;
+    `);
+  let destinationId = destination.recordset[0]?.destination_id;
+  if (!destinationId) {
+    const inserted = await new sql.Request(transaction)
+      .input('destinationName', sql.NVarChar(100), destinationName)
+      .query(`
+        INSERT INTO dbo.destinations (destination_name, region)
+        OUTPUT INSERTED.destination_id
+        VALUES (@destinationName, N'Toàn quốc');
+      `);
+    destinationId = inserted.recordset[0].destination_id;
+  }
+
+  return { categoryId, destinationId };
+}
+
+async function saveTourSchedules(transaction, tourId, schedules) {
+  const existingResult = await new sql.Request(transaction)
+    .input('tourId', sql.BigInt, tourId)
+    .query('SELECT schedule_id, booked_slots, hold_slots, status FROM dbo.tour_schedules WHERE tour_id = @tourId;');
+  const existing = new Map(existingResult.recordset.map((row) => [String(row.schedule_id), row]));
+  const retainedIds = new Set();
+
+  for (const schedule of schedules) {
+    const cleanId = schedule.id ? String(schedule.id).replace(/^dbsch-/, '') : '';
+    const current = cleanId ? existing.get(cleanId) : null;
+    if (cleanId && !current) {
+      throw Object.assign(new Error('Lịch khởi hành không thuộc tour này'), { statusCode: 400 });
+    }
+    const maxCapacity = Number(schedule.maxCapacity);
+    if (current && maxCapacity < current.booked_slots + current.hold_slots) {
+      throw Object.assign(new Error('Sức chứa không thể thấp hơn số chỗ đã đặt hoặc đang giữ'), { statusCode: 409 });
+    }
+    const request = new sql.Request(transaction)
+      .input('tourId', sql.BigInt, tourId)
+      .input('departureDate', sql.Date, schedule.departureDate)
+      .input('returnDate', sql.Date, schedule.returnDate)
+      .input('adultPrice', sql.Decimal(18, 2), Number(schedule.adultPrice))
+      .input('childPrice', sql.Decimal(18, 2), Number(schedule.childPrice))
+      .input('infantPrice', sql.Decimal(18, 2), Number(schedule.infantPrice))
+      .input('maxCapacity', sql.Int, maxCapacity)
+      .input('minCapacity', sql.Int, Number(schedule.minCapacity));
+
+    if (current) {
+      retainedIds.add(cleanId);
+      await request
+        .input('scheduleId', sql.BigInt, cleanId)
+        .query(`
+          UPDATE dbo.tour_schedules
+          SET departure_date = @departureDate, return_date = @returnDate,
+              adult_price = @adultPrice, child_price = @childPrice, infant_price = @infantPrice,
+              max_capacity = @maxCapacity, min_capacity = @minCapacity,
+              status = CASE
+                WHEN status IN ('COMPLETED', 'CANCELLED') THEN status
+                WHEN booked_slots + hold_slots >= @maxCapacity THEN 'SOLD_OUT'
+                ELSE 'AVAILABLE'
+              END
+          WHERE schedule_id = @scheduleId AND tour_id = @tourId;
+        `);
+    } else {
+      await request.query(`
+        INSERT INTO dbo.tour_schedules (
+          tour_id, departure_date, return_date, adult_price, child_price, infant_price,
+          max_capacity, min_capacity, booked_slots, hold_slots, status
+        )
+        VALUES (
+          @tourId, @departureDate, @returnDate, @adultPrice, @childPrice, @infantPrice,
+          @maxCapacity, @minCapacity, 0, 0, 'AVAILABLE'
+        );
+      `);
+    }
+  }
+
+  for (const [id] of existing) {
+    if (retainedIds.has(id)) continue;
+    const bookingResult = await new sql.Request(transaction)
+      .input('scheduleId', sql.BigInt, id)
+      .query('SELECT COUNT_BIG(*) AS booking_count FROM dbo.bookings WHERE schedule_id = @scheduleId;');
+    if (Number(bookingResult.recordset[0].booking_count) > 0) {
+      throw Object.assign(new Error('Không thể xóa lịch khởi hành đã có đơn đặt tour'), { statusCode: 409 });
+    }
+    await new sql.Request(transaction)
+      .input('scheduleId', sql.BigInt, id)
+      .query('DELETE FROM dbo.tour_schedules WHERE schedule_id = @scheduleId;');
+  }
+}
+
+async function saveTourImages(transaction, tourId, images) {
+  await new sql.Request(transaction)
+    .input('tourId', sql.BigInt, tourId)
+    .query('DELETE FROM dbo.tour_images WHERE tour_id = @tourId;');
+  for (const imageUrl of images || []) {
+    if (!imageUrl.trim()) continue;
+    await new sql.Request(transaction)
+      .input('tourId', sql.BigInt, tourId)
+      .input('imageUrl', sql.NVarChar(500), imageUrl.trim())
+      .query(`
+        INSERT INTO dbo.tour_images (tour_id, image_url, is_thumbnail)
+        VALUES (@tourId, @imageUrl, 0);
+      `);
+  }
+}
+
+async function saveTourItineraries(transaction, tourId, itineraries) {
+  await new sql.Request(transaction)
+    .input('tourId', sql.BigInt, tourId)
+    .query('DELETE FROM dbo.tour_itineraries WHERE tour_id = @tourId;');
+  for (const itinerary of itineraries || []) {
+    await new sql.Request(transaction)
+      .input('tourId', sql.BigInt, tourId)
+      .input('dayNumber', sql.Int, Number(itinerary.dayNumber))
+      .input('dayTitle', sql.NVarChar(200), itinerary.title.trim())
+      .input('description', sql.NVarChar(sql.MAX), itinerary.description.trim())
+      .input('activities', sql.NVarChar(sql.MAX), JSON.stringify(itinerary.activities || []))
+      .input('meals', sql.NVarChar(100), itinerary.meals || '')
+      .input('hotel', sql.NVarChar(200), itinerary.hotel || '')
+      .query(`
+        INSERT INTO dbo.tour_itineraries (tour_id, day_number, day_title, description, activities, meals, hotel)
+        VALUES (@tourId, @dayNumber, @dayTitle, @description, @activities, @meals, @hotel);
+      `);
+  }
+}
+
+async function executeTourWrite(req, res, operation) {
+  const validationMessage = validateTourPayload(req.body);
+  if (validationMessage) {
+    return res.status(400).json({ success: false, message: validationMessage });
+  }
+
+  let transaction;
+  let transactionStarted = false;
+  try {
+    transaction = new sql.Transaction(await getDbPool());
+    await transaction.begin();
+    transactionStarted = true;
+    const { categoryId, destinationId } = await ensureCategoryAndDestination(transaction, req.body);
+    const firstSchedule = req.body.schedules[0];
+    const tourId = await operation(transaction, categoryId, destinationId, firstSchedule);
+    await saveTourSchedules(transaction, tourId, req.body.schedules);
+    await saveTourImages(transaction, tourId, req.body.albumImages || []);
+    await saveTourItineraries(transaction, tourId, req.body.itineraries || []);
+    await transaction.commit();
+    return res.json({ success: true, message: 'Lưu tour thành công' });
+  } catch (err) {
+    if (transactionStarted) {
+      try {
+        await transaction.rollback();
+      } catch (rollbackError) {
+        console.error('[Admin tours] Lỗi rollback transaction:', rollbackError.message);
+      }
+    }
+    console.error('[Admin tours] Lỗi lưu tour:', err.message);
+    return res.status(err.statusCode || 500).json({ success: false, message: err.statusCode ? err.message : 'Không thể lưu tour vào SQL Server' });
+  }
+}
 
 // Khởi tạo và nạp dữ liệu từ SQL Server dbo.bookings nếu có
 getDbPool().then(async (pool) => {
@@ -70,12 +440,30 @@ getDbPool().then(async (pool) => {
 }).catch(() => {});
 
 // 1. Lấy danh sách danh mục
-app.get('/api/categories', (req, res) => {
-  res.json({ success: true, data: mockCategories });
+app.get('/api/categories', async (req, res) => {
+  try {
+    const pool = await getDbPool();
+    const result = await pool.request().query(`
+      SELECT category_id, category_name, slug, description
+      FROM dbo.categories
+      ORDER BY category_id;
+    `);
+    const databaseCategories = result.recordset.map((row) => ({
+      id: `dbcat-${row.category_id}`,
+      name: row.category_name,
+      slug: row.slug,
+      description: row.description || '',
+      region: 'Toàn quốc'
+    }));
+    res.json({ success: true, data: [...mockCategories, ...databaseCategories] });
+  } catch (err) {
+    console.error('[GET /api/categories] Không tải được danh mục từ SQL Server:', err.message);
+    res.json({ success: true, data: mockCategories });
+  }
 });
 
 // 2. Lấy danh sách Tours (hỗ trợ lọc & sắp xếp)
-app.get('/api/tours', (req, res) => {
+app.get('/api/tours', async (req, res) => {
   const {
     keyword,
     departureCity,
@@ -88,7 +476,13 @@ app.get('/api/tours', (req, res) => {
     sortBy
   } = req.query;
 
-  let results = [...toursData];
+  let databaseTours = [];
+  try {
+    databaseTours = await getSqlTours();
+  } catch (err) {
+    console.error('[GET /api/tours] Không tải được tour từ SQL Server:', err.message);
+  }
+  let results = [...toursData, ...databaseTours];
 
   // Lọc theo từ khóa
   if (keyword) {
@@ -170,11 +564,138 @@ app.get('/api/tours', (req, res) => {
   });
 });
 
+app.get('/api/admin/tours', requireAdmin, async (req, res) => {
+  try {
+    const tours = await getSqlTours(true);
+    res.json({ success: true, data: tours });
+  } catch (err) {
+    console.error('[GET /api/admin/tours] Lỗi:', err.message);
+    res.status(500).json({ success: false, message: 'Không thể tải danh sách tour từ SQL Server' });
+  }
+});
+
+app.post('/api/admin/tours', requireAdmin, async (req, res) => {
+  return executeTourWrite(req, res, async (transaction, categoryId, destinationId, firstSchedule) => {
+    const result = await new sql.Request(transaction)
+      .input('title', sql.NVarChar(200), req.body.title.trim())
+      .input('slug', sql.VarChar(220), `${createSlug(req.body.title)}-${Date.now().toString(36)}`)
+      .input('categoryId', sql.Int, categoryId)
+      .input('destinationId', sql.Int, destinationId)
+      .input('durationDays', sql.Int, Number(req.body.durationDays))
+      .input('durationNights', sql.Int, Number(req.body.durationNights))
+      .input('departureLocation', sql.NVarChar(150), req.body.departureCity.trim())
+      .input('transportation', sql.NVarChar(100), req.body.transportType)
+      .input('adultPrice', sql.Decimal(18, 2), Number(firstSchedule.adultPrice))
+      .input('childPrice', sql.Decimal(18, 2), Number(firstSchedule.childPrice))
+      .input('infantPrice', sql.Decimal(18, 2), Number(firstSchedule.infantPrice))
+      .input('overviewDescription', sql.NVarChar(sql.MAX), req.body.overviewDescription.trim())
+      .input('inclusions', sql.NVarChar(sql.MAX), req.body.inclusions || '')
+      .input('exclusions', sql.NVarChar(sql.MAX), req.body.exclusions || '')
+      .input('cancellationPolicy', sql.NVarChar(sql.MAX), req.body.cancellationPolicy || '')
+      .input('thumbnailUrl', sql.NVarChar(500), req.body.thumbnailUrl.trim())
+      .input('tourType', sql.VarChar(30), req.body.tourType || 'RESORT')
+      .input('isFeatured', sql.Bit, Boolean(req.body.isFeatured))
+      .query(`
+        INSERT INTO dbo.tours (
+          title, slug, category_id, destination_id, duration_days, duration_nights,
+          departure_location, transportation, adult_price, child_price, infant_price,
+          overview_description, inclusions, exclusions, cancellation_policy,
+          thumbnail_url, tour_type, is_featured
+        )
+        OUTPUT INSERTED.tour_id
+        VALUES (
+          @title, @slug, @categoryId, @destinationId, @durationDays, @durationNights,
+          @departureLocation, @transportation, @adultPrice, @childPrice, @infantPrice,
+          @overviewDescription, @inclusions, @exclusions, @cancellationPolicy,
+          @thumbnailUrl, @tourType, @isFeatured
+        );
+      `);
+    return result.recordset[0].tour_id;
+  });
+});
+
+app.put('/api/admin/tours/:id', requireAdmin, async (req, res) => {
+  const tourId = String(req.params.id).replace(/^dbtour-/, '');
+  if (!/^\d+$/.test(tourId)) {
+    return res.status(400).json({ success: false, message: 'Mã tour không hợp lệ' });
+  }
+  return executeTourWrite(req, res, async (transaction, categoryId, destinationId, firstSchedule) => {
+    const result = await new sql.Request(transaction)
+      .input('tourId', sql.BigInt, tourId)
+      .input('title', sql.NVarChar(200), req.body.title.trim())
+      .input('categoryId', sql.Int, categoryId)
+      .input('destinationId', sql.Int, destinationId)
+      .input('durationDays', sql.Int, Number(req.body.durationDays))
+      .input('durationNights', sql.Int, Number(req.body.durationNights))
+      .input('departureLocation', sql.NVarChar(150), req.body.departureCity.trim())
+      .input('transportation', sql.NVarChar(100), req.body.transportType)
+      .input('adultPrice', sql.Decimal(18, 2), Number(firstSchedule.adultPrice))
+      .input('childPrice', sql.Decimal(18, 2), Number(firstSchedule.childPrice))
+      .input('infantPrice', sql.Decimal(18, 2), Number(firstSchedule.infantPrice))
+      .input('overviewDescription', sql.NVarChar(sql.MAX), req.body.overviewDescription.trim())
+      .input('inclusions', sql.NVarChar(sql.MAX), req.body.inclusions || '')
+      .input('exclusions', sql.NVarChar(sql.MAX), req.body.exclusions || '')
+      .input('cancellationPolicy', sql.NVarChar(sql.MAX), req.body.cancellationPolicy || '')
+      .input('thumbnailUrl', sql.NVarChar(500), req.body.thumbnailUrl.trim())
+      .input('tourType', sql.VarChar(30), req.body.tourType || 'RESORT')
+      .input('isFeatured', sql.Bit, Boolean(req.body.isFeatured))
+      .query(`
+        UPDATE dbo.tours
+        SET title = @title, category_id = @categoryId, destination_id = @destinationId,
+            duration_days = @durationDays, duration_nights = @durationNights,
+            departure_location = @departureLocation, transportation = @transportation,
+            adult_price = @adultPrice, child_price = @childPrice, infant_price = @infantPrice,
+            overview_description = @overviewDescription, inclusions = @inclusions,
+            exclusions = @exclusions, cancellation_policy = @cancellationPolicy,
+            thumbnail_url = @thumbnailUrl, tour_type = @tourType, is_featured = @isFeatured,
+            updated_at = GETDATE()
+        OUTPUT INSERTED.tour_id
+        WHERE tour_id = @tourId;
+      `);
+    if (result.recordset.length === 0) {
+      throw Object.assign(new Error('Không tìm thấy tour'), { statusCode: 404 });
+    }
+    return result.recordset[0].tour_id;
+  });
+});
+
+app.delete('/api/admin/tours/:id', requireAdmin, async (req, res) => {
+  const tourId = String(req.params.id).replace(/^dbtour-/, '');
+  if (!/^\d+$/.test(tourId)) {
+    return res.status(400).json({ success: false, message: 'Mã tour không hợp lệ' });
+  }
+  try {
+    const pool = await getDbPool();
+    const result = await pool.request()
+      .input('tourId', sql.BigInt, tourId)
+      .query(`
+        UPDATE dbo.tours
+        SET is_active = 0, updated_at = GETDATE()
+        WHERE tour_id = @tourId AND is_active = 1;
+      `);
+    if (result.rowsAffected[0] === 0) {
+      return res.status(404).json({ success: false, message: 'Không tìm thấy tour đang hoạt động' });
+    }
+    res.json({ success: true, message: 'Đã ngừng kinh doanh tour' });
+  } catch (err) {
+    console.error('[DELETE /api/admin/tours/:id] Lỗi:', err.message);
+    res.status(500).json({ success: false, message: 'Không thể ngừng kinh doanh tour trong SQL Server' });
+  }
+});
+
 // 3. Lấy chi tiết 1 Tour
-app.get('/api/tours/:id', (req, res) => {
-  const tour = toursData.find(
+app.get('/api/tours/:id', async (req, res) => {
+  let tour = toursData.find(
     (t) => t.id === req.params.id || t.slug === req.params.id
   );
+  if (!tour) {
+    try {
+      const databaseTours = await getSqlTours();
+      tour = databaseTours.find((t) => t.id === req.params.id || t.slug === req.params.id);
+    } catch (err) {
+      console.error('[GET /api/tours/:id] Không tải được tour từ SQL Server:', err.message);
+    }
+  }
   if (!tour) {
     return res.status(404).json({ success: false, message: 'Không tìm thấy tour du lịch' });
   }
@@ -263,7 +784,15 @@ app.post('/api/bookings', async (req, res) => {
     }
 
     // Tìm tour & schedule
-    const tour = toursData.find((t) => t.id === tourId) || toursData[0];
+    let tour = toursData.find((t) => t.id === tourId);
+    if (!tour && /^dbtour-\d+$/.test(String(tourId))) {
+      try {
+        tour = (await getSqlTours()).find((item) => item.id === tourId);
+      } catch (err) {
+        console.error('[POST /api/bookings] Không tải được tour từ SQL Server:', err.message);
+        return res.status(500).json({ success: false, message: 'Không thể tải thông tin tour để đặt chỗ' });
+      }
+    }
     if (!tour) {
       return res.status(404).json({ success: false, message: 'Tour không tồn tại' });
     }

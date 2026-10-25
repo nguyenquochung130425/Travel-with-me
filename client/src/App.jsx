@@ -26,6 +26,7 @@ import './App.css';
 export default function App() {
   const [currentView, setCurrentView] = useState('client'); // 'client' | 'admin'
   const [tours, setTours] = useState(mockTours);
+  const [managedTours, setManagedTours] = useState([]);
   const [categories, setCategories] = useState(mockCategories);
   const [coupons, setCoupons] = useState(mockCoupons);
   const [bookings, setBookings] = useState([]); // Khởi tạo rỗng, nạp từ SQL Server theo từng tài khoản
@@ -133,20 +134,80 @@ export default function App() {
   const [showMyTrips, setShowMyTrips] = useState(false);
   const [reviewBookingTarget, setReviewBookingTarget] = useState(null);
 
-  // Fetch from Express API with fallback
-  useEffect(() => {
-    fetch('/api/tours')
-      .then((res) => res.json())
-      .then((res) => {
-        if (res.success && res.data) {
-          setTours(res.data);
-        }
-      })
-      .catch(() => {
-        // Fallback to local mock data
-        setTours(mockTours);
-      });
+  const refreshTours = useCallback(async () => {
+    const response = await fetch('/api/tours');
+    const result = await response.json();
+    if (!response.ok || !result.success || !Array.isArray(result.data)) {
+      throw new Error(result.message || 'Không thể tải danh sách tour');
+    }
+    setTours(result.data);
   }, []);
+
+  const refreshManagedTours = useCallback(async () => {
+    const token = localStorage.getItem('twm_token');
+    const response = await fetch('/api/admin/tours', {
+      headers: { Authorization: `Bearer ${token || ''}` }
+    });
+    const result = await response.json();
+    if (!response.ok || !result.success || !Array.isArray(result.data)) {
+      throw new Error(result.message || 'Không thể tải danh sách tour quản trị');
+    }
+    setManagedTours(result.data);
+  }, []);
+
+  useEffect(() => {
+    refreshTours().catch((err) => {
+      console.error('[Lỗi tải danh sách tour]:', err);
+    });
+  }, [refreshTours]);
+
+  useEffect(() => {
+    fetch('/api/categories')
+      .then((response) => response.json())
+      .then((result) => {
+        if (result.success && Array.isArray(result.data)) setCategories(result.data);
+      })
+      .catch((err) => console.error('[Lỗi tải danh mục tour]:', err));
+  }, []);
+
+  useEffect(() => {
+    if (currentView !== 'admin' || !['SUPER_ADMIN', 'ADMIN'].includes(authUser?.role)) return;
+    refreshManagedTours().catch((err) => {
+      console.error('[Lỗi tải tour quản trị]:', err);
+      showToast(err.message);
+    });
+  }, [authUser, currentView, refreshManagedTours, showToast]);
+
+  const sendAdminTourRequest = useCallback(async (method, path, body, successMessage) => {
+    const token = localStorage.getItem('twm_token');
+    const response = await fetch(path, {
+      method,
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token || ''}`
+      },
+      ...(body ? { body: JSON.stringify(body) } : {})
+    });
+    const result = await response.json();
+    if (!response.ok || !result.success) {
+      throw new Error(result.message || 'Không thể hoàn tất thao tác quản lý tour');
+    }
+    await Promise.all([refreshTours(), refreshManagedTours()]);
+    showToast(successMessage);
+  }, [refreshManagedTours, refreshTours, showToast]);
+
+  const handleCreateTour = useCallback(
+    (tour) => sendAdminTourRequest('POST', '/api/admin/tours', tour, 'Đã thêm tour mới'),
+    [sendAdminTourRequest]
+  );
+  const handleUpdateTour = useCallback(
+    (tour, changes) => sendAdminTourRequest('PUT', `/api/admin/tours/${encodeURIComponent(tour.id)}`, changes, 'Đã cập nhật tour'),
+    [sendAdminTourRequest]
+  );
+  const handleDeleteTour = useCallback(
+    (tour) => sendAdminTourRequest('DELETE', `/api/admin/tours/${encodeURIComponent(tour.id)}`, null, 'Đã ngừng kinh doanh tour'),
+    [sendAdminTourRequest]
+  );
 
   // Automatically redirect away from admin view if current role is USER
   useEffect(() => {
@@ -540,9 +601,14 @@ export default function App() {
         <main>
           <AdminDashboard
             tours={tours}
+            managedTours={managedTours}
             bookings={bookings}
             coupons={coupons}
+            isTourAdmin={['SUPER_ADMIN', 'ADMIN'].includes(authUser?.role)}
             onUpdateBookingStatus={handleUpdateBookingStatus}
+            onCreateTour={handleCreateTour}
+            onUpdateTour={handleUpdateTour}
+            onDeleteTour={handleDeleteTour}
           />
         </main>
       )}
