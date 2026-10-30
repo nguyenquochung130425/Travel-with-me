@@ -244,7 +244,25 @@ router.post('/login', async (req, res) => {
       return res.status(401).json({ success: false, message: 'Email hoặc mật khẩu không đúng' });
     }
 
-    const passwordMatch = await bcrypt.compare(password, user.password_hash);
+    let passwordMatch = false;
+    try {
+      passwordMatch = await bcrypt.compare(password, user.password_hash);
+    } catch {
+      passwordMatch = false;
+    }
+
+    // Fallback nếu mật khẩu trong DB lưu dạng plain text (tài khoản seed mẫu)
+    if (!passwordMatch && user.password_hash === password) {
+      passwordMatch = true;
+      try {
+        const upgradedHash = await bcrypt.hash(password, 12);
+        await pool.request()
+          .input('h', sql.VarChar, upgradedHash)
+          .input('uid', sql.BigInt, user.user_id)
+          .query('UPDATE dbo.users SET password_hash = @h WHERE user_id = @uid');
+      } catch {}
+    }
+
     if (!passwordMatch) {
       return res.status(401).json({ success: false, message: 'Email hoặc mật khẩu không đúng' });
     }

@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Plus, Trash2, X } from 'lucide-react';
+import { Plus, Trash2, X, AlertTriangle } from 'lucide-react';
 
 function getInitialSchedule(tour) {
   if (tour?.schedules?.length) {
@@ -44,7 +44,11 @@ export function AdminTourForm({ tour, onSave, onClose }) {
     schedules: getInitialSchedule(tour),
     itineraries: (tour?.itineraries || []).map((itinerary) => ({
       ...itinerary,
-      activitiesText: (itinerary.activities || []).join(', ')
+      title: itinerary.title || itinerary.dayTitle || '',
+      description: itinerary.description || '',
+      activitiesText: Array.isArray(itinerary.activities)
+        ? itinerary.activities.join(', ')
+        : (itinerary.activitiesText || '')
     }))
   });
   const [error, setError] = useState('');
@@ -77,7 +81,7 @@ export function AdminTourForm({ tour, onSave, onClose }) {
         ...form,
         durationDays: Number(form.durationDays),
         durationNights: Number(form.durationNights),
-        albumImages: form.albumImagesText.split(/\r?\n/).map((image) => image.trim()).filter(Boolean),
+        albumImages: (form.albumImagesText || '').split(/\r?\n/).map((image) => image.trim()).filter(Boolean),
         schedules: form.schedules.map((schedule) => ({
           ...schedule,
           adultPrice: Number(schedule.adultPrice),
@@ -89,11 +93,15 @@ export function AdminTourForm({ tour, onSave, onClose }) {
         itineraries: form.itineraries.map((itinerary) => ({
           ...itinerary,
           dayNumber: Number(itinerary.dayNumber),
-          activities: itinerary.activitiesText.split(',').map((activity) => activity.trim()).filter(Boolean)
+          title: (itinerary.title || '').trim(),
+          description: (itinerary.description || '').trim(),
+          activities: typeof itinerary.activitiesText === 'string'
+            ? itinerary.activitiesText.split(',').map((activity) => activity.trim()).filter(Boolean)
+            : (Array.isArray(itinerary.activities) ? itinerary.activities : [])
         }))
       });
     } catch (saveError) {
-      setError(saveError.message || 'Không thể lưu tour. Vui lòng thử lại.');
+      setError(saveError.message || 'Không thể lưu tour. Vui lòng kiểm tra lại thông tin.');
     } finally {
       setSaving(false);
     }
@@ -319,7 +327,12 @@ export function AdminTourForm({ tour, onSave, onClose }) {
           </div>
         ))}
 
-        {error && <p className="admin-tour-error" role="alert">{error}</p>}
+        {error && (
+          <div className="admin-tour-error" role="alert">
+            <AlertTriangle size={18} className="admin-tour-error-icon" />
+            <span>{error}</span>
+          </div>
+        )}
         <div className="admin-tour-form-actions">
           <button type="button" className="btn btn-outline" onClick={onClose} disabled={saving}>Hủy</button>
           <button type="submit" className="btn btn-primary" disabled={saving}>

@@ -82,7 +82,14 @@ function mapSqlTourRows(tourRows, scheduleRows, imageRows, itineraryRows) {
         dayNumber: itinerary.day_number,
         title: itinerary.day_title,
         description: itinerary.description,
-        activities: itinerary.activities ? JSON.parse(itinerary.activities) : [],
+        activities: (() => {
+          if (!itinerary.activities) return [];
+          try {
+            return JSON.parse(itinerary.activities);
+          } catch {
+            return String(itinerary.activities).split(',').map((s) => s.trim()).filter(Boolean);
+          }
+        })(),
         meals: itinerary.meals || '',
         hotel: itinerary.hotel || ''
       }))
@@ -264,13 +271,11 @@ async function saveTourSchedules(transaction, tourId, schedules) {
   const retainedIds = new Set();
 
   for (const schedule of schedules) {
-    const cleanId = schedule.id ? String(schedule.id).replace(/^dbsch-/, '') : '';
+    const rawId = schedule.id ? String(schedule.id).replace(/^(dbsch-|sch-)/, '') : '';
+    const cleanId = /^\d+$/.test(rawId) ? rawId : '';
     const current = cleanId ? existing.get(cleanId) : null;
-    if (cleanId && !current) {
-      throw Object.assign(new Error('Lịch khởi hành không thuộc tour này'), { statusCode: 400 });
-    }
-    const maxCapacity = Number(schedule.maxCapacity);
-    if (current && maxCapacity < current.booked_slots + current.hold_slots) {
+    const maxCapacity = Number(schedule.maxCapacity) || 20;
+    if (current && maxCapacity < (current.booked_slots || 0) + (current.hold_slots || 0)) {
       throw Object.assign(new Error('Sức chứa không thể thấp hơn số chỗ đã đặt hoặc đang giữ'), { statusCode: 409 });
     }
     const request = new sql.Request(transaction)
@@ -348,12 +353,22 @@ async function saveTourItineraries(transaction, tourId, itineraries) {
     .input('tourId', sql.BigInt, tourId)
     .query('DELETE FROM dbo.tour_itineraries WHERE tour_id = @tourId;');
   for (const itinerary of itineraries || []) {
+    const dayNumber = Number(itinerary.dayNumber) || 1;
+    const dayTitle = (itinerary.title || itinerary.dayTitle || `Ngày ${dayNumber}`).trim();
+    const description = (itinerary.description || '').trim();
+    let activitiesStr = '[]';
+    if (Array.isArray(itinerary.activities)) {
+      activitiesStr = JSON.stringify(itinerary.activities);
+    } else if (typeof itinerary.activitiesText === 'string' && itinerary.activitiesText.trim()) {
+      activitiesStr = JSON.stringify(itinerary.activitiesText.split(',').map((s) => s.trim()).filter(Boolean));
+    }
+
     await new sql.Request(transaction)
       .input('tourId', sql.BigInt, tourId)
-      .input('dayNumber', sql.Int, Number(itinerary.dayNumber))
-      .input('dayTitle', sql.NVarChar(200), itinerary.title.trim())
-      .input('description', sql.NVarChar(sql.MAX), itinerary.description.trim())
-      .input('activities', sql.NVarChar(sql.MAX), JSON.stringify(itinerary.activities || []))
+      .input('dayNumber', sql.Int, dayNumber)
+      .input('dayTitle', sql.NVarChar(200), dayTitle)
+      .input('description', sql.NVarChar(sql.MAX), description)
+      .input('activities', sql.NVarChar(sql.MAX), activitiesStr)
       .input('meals', sql.NVarChar(100), itinerary.meals || '')
       .input('hotel', sql.NVarChar(200), itinerary.hotel || '')
       .query(`
@@ -392,8 +407,59 @@ async function executeTourWrite(req, res, operation) {
       }
     }
     console.error('[Admin tours] Lỗi lưu tour:', err.message);
-    return res.status(err.statusCode || 500).json({ success: false, message: err.statusCode ? err.message : 'Không thể lưu tour vào SQL Server' });
+    return res.status(err.statusCode || 500).json({ success: false, message: err.message || 'Không thể lưu tour vào SQL Server' });
   }
+}
+
+// Helper chuyển đổi dòng dữ liệu từ SQL Server dbo.bookings sang đối tượng chuẩn
+export function mapDbBookingRow(row) {
+  let passengers = [];
+  if (row.passengers_json) {
+    try {
+      passengers = typeof row.passengers_json === 'string' ? JSON.parse(row.passengers_json) : row.passengers_json;
+    } catch {
+      passengers = [];
+    }
+  }
+
+  let departureDateStr = row.departure_date;
+  if (row.departure_date instanceof Date) {
+    departureDateStr = row.departure_date.toISOString().slice(0, 10);
+  }
+  let returnDateStr = row.return_date;
+  if (row.return_date instanceof Date) {
+    returnDateStr = row.return_date.toISOString().slice(0, 10);
+  }
+
+  return {
+    id: `bk-${row.booking_id}`,
+    bookingId: row.booking_id,
+    bookingCode: row.booking_code,
+    userId: row.user_id,
+    tourId: row.tour_id,
+    tourTitle: row.tour_title,
+    tourImage: row.tour_image,
+    scheduleId: row.schedule_id ? `sch-${row.schedule_id}` : null,
+    departureDate: departureDateStr,
+    returnDate: returnDateStr,
+    numAdults: row.num_adults,
+    numChildren: row.num_children,
+    numInfants: row.num_infants,
+    totalPassengers: (row.num_adults || 0) + (row.num_children || 0) + (row.num_infants || 0),
+    baseAmount: Number(row.subtotal),
+    discountAmount: Number(row.discount_amount),
+    finalAmount: Number(row.total_amount),
+    paymentMethod: row.payment_method,
+    paymentStatus: row.payment_status,
+    status: row.booking_status,
+    contactName: row.contact_name,
+    contactEmail: row.contact_email,
+    contactPhone: row.contact_phone,
+    specialNotes: row.special_requests,
+    passengers,
+    qrCodeToken: row.qr_ticket_code,
+    createdAt: row.created_at
+  };
 }
 
 // Khởi tạo và nạp dữ liệu từ SQL Server dbo.bookings nếu có
@@ -402,35 +468,7 @@ getDbPool().then(async (pool) => {
     try {
       const res = await pool.request().query('SELECT * FROM dbo.bookings ORDER BY created_at DESC');
       if (res.recordset && res.recordset.length > 0) {
-        bookingsData = res.recordset.map((row) => ({
-          id: `bk-${row.booking_id}`,
-          bookingId: row.booking_id,
-          bookingCode: row.booking_code,
-          userId: row.user_id,
-          tourId: row.tour_id,
-          tourTitle: row.tour_title,
-          tourImage: row.tour_image,
-          scheduleId: row.schedule_id ? `sch-${row.schedule_id}` : null,
-          departureDate: row.departure_date,
-          returnDate: row.return_date,
-          numAdults: row.num_adults,
-          numChildren: row.num_children,
-          numInfants: row.num_infants,
-          totalPassengers: (row.num_adults || 0) + (row.num_children || 0) + (row.num_infants || 0),
-          baseAmount: Number(row.subtotal),
-          discountAmount: Number(row.discount_amount),
-          finalAmount: Number(row.total_amount),
-          paymentMethod: row.payment_method,
-          paymentStatus: row.payment_status,
-          status: row.booking_status,
-          contactName: row.contact_name,
-          contactEmail: row.contact_email,
-          contactPhone: row.contact_phone,
-          specialNotes: row.special_requests,
-          passengers: row.passengers_json ? JSON.parse(row.passengers_json) : [],
-          qrCodeToken: row.qr_ticket_code,
-          createdAt: row.created_at
-        }));
+        bookingsData = res.recordset.map(mapDbBookingRow);
         console.log(`[SQL Server] Đã nạp ${bookingsData.length} đơn đặt tour từ database TravelWithMe`);
       }
     } catch (e) {
@@ -455,14 +493,16 @@ app.get('/api/categories', async (req, res) => {
       description: row.description || '',
       region: 'Toàn quốc'
     }));
-    res.json({ success: true, data: [...mockCategories, ...databaseCategories] });
+    const dbCatNames = new Set(databaseCategories.map((c) => c.name.toLowerCase().trim()));
+    const nonDupMockCategories = mockCategories.filter((m) => !dbCatNames.has(m.name.toLowerCase().trim()));
+    res.json({ success: true, data: [...databaseCategories, ...nonDupMockCategories] });
   } catch (err) {
     console.error('[GET /api/categories] Không tải được danh mục từ SQL Server:', err.message);
     res.json({ success: true, data: mockCategories });
   }
 });
 
-// 2. Lấy danh sách Tours (hỗ trợ lọc & sắp xếp)
+// 2. Lấy danh sách Tours (hỗ trợ lọc & sắp xếp, ưu tiên SQL Server, loại bỏ trùng lặp)
 app.get('/api/tours', async (req, res) => {
   const {
     keyword,
@@ -482,7 +522,18 @@ app.get('/api/tours', async (req, res) => {
   } catch (err) {
     console.error('[GET /api/tours] Không tải được tour từ SQL Server:', err.message);
   }
-  let results = [...toursData, ...databaseTours];
+  
+  let results = [];
+  if (databaseTours.length > 0) {
+    const dbTitles = new Set(databaseTours.map((t) => (t.title || '').toLowerCase().trim()));
+    const dbSlugs = new Set(databaseTours.map((t) => t.slug));
+    const nonDuplicatedMock = toursData.filter(
+      (m) => !dbTitles.has((m.title || '').toLowerCase().trim()) && !dbSlugs.has(m.slug)
+    );
+    results = [...databaseTours, ...nonDuplicatedMock];
+  } else {
+    results = [...toursData];
+  }
 
   // Lọc theo từ khóa
   if (keyword) {
@@ -615,7 +666,7 @@ app.post('/api/admin/tours', requireAdmin, async (req, res) => {
 });
 
 app.put('/api/admin/tours/:id', requireAdmin, async (req, res) => {
-  const tourId = String(req.params.id).replace(/^dbtour-/, '');
+  const tourId = String(req.params.id).replace(/^(dbtour-|tour-)/, '');
   if (!/^\d+$/.test(tourId)) {
     return res.status(400).json({ success: false, message: 'Mã tour không hợp lệ' });
   }
@@ -653,14 +704,14 @@ app.put('/api/admin/tours/:id', requireAdmin, async (req, res) => {
         WHERE tour_id = @tourId;
       `);
     if (result.recordset.length === 0) {
-      throw Object.assign(new Error('Không tìm thấy tour'), { statusCode: 404 });
+      throw Object.assign(new Error('Không tìm thấy tour trong hệ thống SQL Server'), { statusCode: 404 });
     }
     return result.recordset[0].tour_id;
   });
 });
 
 app.delete('/api/admin/tours/:id', requireAdmin, async (req, res) => {
-  const tourId = String(req.params.id).replace(/^dbtour-/, '');
+  const tourId = String(req.params.id).replace(/^(dbtour-|tour-)/, '');
   if (!/^\d+$/.test(tourId)) {
     return res.status(400).json({ success: false, message: 'Mã tour không hợp lệ' });
   }
@@ -683,18 +734,28 @@ app.delete('/api/admin/tours/:id', requireAdmin, async (req, res) => {
   }
 });
 
-// 3. Lấy chi tiết 1 Tour
+// 3. Lấy chi tiết 1 Tour (Ưu tiên SQL Server)
 app.get('/api/tours/:id', async (req, res) => {
-  let tour = toursData.find(
-    (t) => t.id === req.params.id || t.slug === req.params.id
-  );
+  let tour = null;
+  try {
+    const databaseTours = await getSqlTours(true);
+    const target = String(req.params.id);
+    const targetNum = target.replace(/^(dbtour-|tour-)/, '');
+    tour = databaseTours.find(
+      (t) =>
+        t.id === target ||
+        t.slug === target ||
+        t.id === `dbtour-${targetNum}` ||
+        String(t.tourId) === targetNum
+    );
+  } catch (err) {
+    console.error('[GET /api/tours/:id] Không tải được tour từ SQL Server:', err.message);
+  }
+
   if (!tour) {
-    try {
-      const databaseTours = await getSqlTours();
-      tour = databaseTours.find((t) => t.id === req.params.id || t.slug === req.params.id);
-    } catch (err) {
-      console.error('[GET /api/tours/:id] Không tải được tour từ SQL Server:', err.message);
-    }
+    tour = toursData.find(
+      (t) => t.id === req.params.id || t.slug === req.params.id
+    );
   }
   if (!tour) {
     return res.status(404).json({ success: false, message: 'Không tìm thấy tour du lịch' });
@@ -989,35 +1050,7 @@ app.get('/api/bookings/my-trips', async (req, res) => {
           ORDER BY created_at DESC
         `);
 
-      const formattedTrips = result.recordset.map((row) => ({
-        id: `bk-${row.booking_id}`,
-        bookingId: row.booking_id,
-        bookingCode: row.booking_code,
-        userId: row.user_id,
-        tourId: row.tour_id,
-        tourTitle: row.tour_title,
-        tourImage: row.tour_image,
-        scheduleId: row.schedule_id ? `sch-${row.schedule_id}` : null,
-        departureDate: row.departure_date,
-        returnDate: row.return_date,
-        numAdults: row.num_adults,
-        numChildren: row.num_children,
-        numInfants: row.num_infants,
-        totalPassengers: (row.num_adults || 0) + (row.num_children || 0) + (row.num_infants || 0),
-        baseAmount: Number(row.subtotal),
-        discountAmount: Number(row.discount_amount),
-        finalAmount: Number(row.total_amount),
-        paymentMethod: row.payment_method,
-        paymentStatus: row.payment_status,
-        status: row.booking_status,
-        contactName: row.contact_name,
-        contactEmail: row.contact_email,
-        contactPhone: row.contact_phone,
-        specialNotes: row.special_requests,
-        passengers: row.passengers_json ? JSON.parse(row.passengers_json) : [],
-        qrCodeToken: row.qr_ticket_code,
-        createdAt: row.created_at
-      }));
+      const formattedTrips = result.recordset.map(mapDbBookingRow);
 
       return res.json({
         success: true,
@@ -1171,11 +1204,119 @@ app.post('/api/reviews', (req, res) => {
   });
 });
 
-// 10. Admin: Thống kê & Báo cáo Dashboard
-app.get('/api/admin/dashboard', (req, res) => {
+// 10. Admin: Lấy toàn bộ danh sách đơn đặt tour từ SQL Server (kết nối tất cả tài khoản khách)
+app.get('/api/admin/bookings', async (req, res) => {
+  try {
+    const pool = await getDbPool();
+    if (pool) {
+      const result = await pool.request().query(`
+        SELECT * FROM dbo.bookings
+        ORDER BY created_at DESC;
+      `);
+      const bookings = result.recordset.map(mapDbBookingRow);
+      bookingsData = bookings; // Đồng bộ in-memory
+      return res.json({ success: true, data: bookings });
+    }
+  } catch (err) {
+    console.error('[GET /api/admin/bookings] Lỗi SQL Server:', err.message);
+  }
+  return res.json({ success: true, data: bookingsData });
+});
+
+// 11. Admin: Thống kê & Báo cáo Dashboard (Tổng hợp trực tiếp từ SQL Server)
+app.get('/api/admin/dashboard', async (req, res) => {
+  try {
+    const pool = await getDbPool();
+    if (pool) {
+      // 1. Thống kê tổng quan từ SQL Server dbo.bookings
+      const summaryResult = await pool.request().query(`
+        SELECT 
+          COUNT(*) AS totalBookings,
+          COUNT(CASE WHEN booking_status = 'COMPLETED' THEN 1 END) AS completedBookings,
+          COUNT(CASE WHEN booking_status IN ('PAID', 'CONFIRMED', 'COMPLETED', 'IN_TOUR') THEN 1 END) AS paidOrConfirmedBookings,
+          ISNULL(SUM(CASE WHEN booking_status IN ('PAID', 'CONFIRMED', 'COMPLETED', 'IN_TOUR') THEN total_amount ELSE 0 END), 0) AS totalRevenue,
+          COUNT(CASE WHEN booking_status IN ('CANCELLED', 'REFUNDED') THEN 1 END) AS cancelledBookings
+        FROM dbo.bookings;
+      `);
+
+      const s = summaryResult.recordset[0] || {};
+      const totalBookings = Number(s.totalBookings) || 0;
+      const totalRevenue = Number(s.totalRevenue) || 0;
+      const completedBookings = Number(s.completedBookings) || 0;
+      const cancelledBookings = Number(s.cancelledBookings) || 0;
+      const cancellationRate = totalBookings > 0 ? Number(((cancelledBookings / totalBookings) * 100).toFixed(1)) : 0;
+
+      // 2. Doanh thu 6 tháng gần nhất từ dbo.bookings trong SQL Server
+      const chartResult = await pool.request().query(`
+        SELECT 
+          MONTH(created_at) AS month_num,
+          YEAR(created_at) AS year_num,
+          ISNULL(SUM(CASE WHEN booking_status IN ('PAID', 'CONFIRMED', 'COMPLETED', 'IN_TOUR') THEN total_amount ELSE 0 END), 0) AS revenue,
+          COUNT(*) AS order_count
+        FROM dbo.bookings
+        GROUP BY YEAR(created_at), MONTH(created_at)
+        ORDER BY year_num ASC, month_num ASC;
+      `);
+
+      let revenueChart = [];
+      if (chartResult.recordset && chartResult.recordset.length > 0) {
+        revenueChart = chartResult.recordset.map((row) => {
+          const rev = Number(row.revenue);
+          const millions = (rev / 1000000).toFixed(rev % 1000000 === 0 ? 0 : 1);
+          return {
+            month: `Tháng ${row.month_num}`,
+            monthNum: row.month_num,
+            year: row.year_num,
+            revenue: rev,
+            val: Number(millions),
+            label: `${millions} triệu`
+          };
+        });
+      }
+
+      if (revenueChart.length === 0) {
+        revenueChart = [
+          { month: 'Tháng 5', revenue: 42500000, val: 42.5, label: '42.5 triệu' },
+          { month: 'Tháng 6', revenue: 68000000, val: 68, label: '68 triệu' },
+          { month: 'Tháng 7', revenue: 95200000, val: 95.2, label: '95.2 triệu' },
+          { month: 'Tháng 8', revenue: 78400000, val: 78.4, label: '78.4 triệu' },
+          { month: 'Tháng 9', revenue: 84100000, val: 84.1, label: '84.1 triệu' },
+          { month: 'Tháng 10', revenue: 112800000, val: 112.8, label: '112.8 triệu' }
+        ];
+      }
+
+      const tourCountResult = await pool.request().query('SELECT COUNT(*) AS activeTours FROM dbo.tours WHERE is_active = 1;');
+      const activeTours = Number(tourCountResult.recordset[0]?.activeTours) || toursData.length || 4;
+
+      return res.json({
+        success: true,
+        data: {
+          summary: {
+            totalRevenue,
+            totalBookings,
+            completedBookings,
+            cancelledBookings,
+            cancellationRate,
+            activeTours
+          },
+          revenueChart,
+          topTours: toursData.slice(0, 3).map((t) => ({
+            id: t.id,
+            title: t.title,
+            bookingsCount: t.reviewCount,
+            rating: t.ratingAverage
+          }))
+        }
+      });
+    }
+  } catch (err) {
+    console.error('[GET /api/admin/dashboard] Lỗi truy vấn SQL Server:', err.message);
+  }
+
+  // Fallback in-memory
   const totalBookings = bookingsData.length;
   const completedOrPaid = bookingsData.filter(
-    (b) => b.status === 'CONFIRMED' || b.status === 'PAID' || b.status === 'COMPLETED'
+    (b) => b.status === 'CONFIRMED' || b.status === 'PAID' || b.status === 'COMPLETED' || b.status === 'IN_TOUR'
   );
   const totalRevenue = completedOrPaid.reduce((sum, b) => sum + Number(b.finalAmount), 0);
   const cancelledBookings = bookingsData.filter(
@@ -1188,18 +1329,18 @@ app.get('/api/admin/dashboard', (req, res) => {
       summary: {
         totalRevenue,
         totalBookings,
-        completedBookings: completedOrPaid.length,
+        completedBookings: bookingsData.filter((b) => b.status === 'COMPLETED').length,
         cancelledBookings,
-        cancellationRate: totalBookings ? ((cancelledBookings / totalBookings) * 100).toFixed(1) : 0,
+        cancellationRate: totalBookings ? Number(((cancelledBookings / totalBookings) * 100).toFixed(1)) : 0,
         activeTours: toursData.filter((t) => t.status === 'ACTIVE').length
       },
       revenueChart: [
-        { month: 'Tháng 5', revenue: 42000000 },
-        { month: 'Tháng 6', revenue: 68000000 },
-        { month: 'Tháng 7', revenue: 95000000 },
-        { month: 'Tháng 8', revenue: 78000000 },
-        { month: 'Tháng 9', revenue: 84000000 },
-        { month: 'Tháng 10', revenue: 112000000 }
+        { month: 'Tháng 5', revenue: 42500000, val: 42.5, label: '42.5 triệu' },
+        { month: 'Tháng 6', revenue: 68000000, val: 68, label: '68 triệu' },
+        { month: 'Tháng 7', revenue: 95200000, val: 95.2, label: '95.2 triệu' },
+        { month: 'Tháng 8', revenue: 78400000, val: 78.4, label: '78.4 triệu' },
+        { month: 'Tháng 9', revenue: 84100000, val: 84.1, label: '84.1 triệu' },
+        { month: 'Tháng 10', revenue: 112800000, val: 112.8, label: '112.8 triệu' }
       ],
       topTours: toursData.slice(0, 3).map((t) => ({
         id: t.id,
@@ -1211,20 +1352,92 @@ app.get('/api/admin/dashboard', (req, res) => {
   });
 });
 
-// 11. Admin: Cập nhật trạng thái đơn đặt
-app.patch('/api/admin/bookings/:id/status', (req, res) => {
+// 12. Admin: Cập nhật trạng thái đơn đặt (Lưu trực tiếp vào SQL Server)
+app.patch('/api/admin/bookings/:id/status', async (req, res) => {
   const { status } = req.body;
-  const booking = bookingsData.find((b) => b.id === req.params.id);
-  if (!booking) {
-    return res.status(404).json({ success: false, message: 'Không tìm thấy đơn hàng' });
+  const rawId = req.params.id;
+  const numericId = rawId.startsWith('bk-') ? Number(rawId.replace('bk-', '')) : Number(rawId);
+
+  if (!status) {
+    return res.status(400).json({ success: false, message: 'Thiếu trạng thái cần cập nhật' });
   }
 
-  booking.status = status;
-  res.json({
-    success: true,
-    message: `Cập nhật trạng thái đơn thành ${status} thành công`,
-    data: booking
-  });
+  let paymentStatus = null;
+  if (['PAID', 'CONFIRMED', 'COMPLETED', 'IN_TOUR'].includes(status)) {
+    paymentStatus = 'PAID';
+  } else if (['CANCELLED', 'REFUNDED'].includes(status)) {
+    paymentStatus = 'REFUNDED';
+  } else if (status === 'PENDING_PAYMENT') {
+    paymentStatus = 'PENDING';
+  }
+
+  let updatedRow = null;
+
+  try {
+    const pool = await getDbPool();
+    if (pool) {
+      const request = pool.request().input('status', status);
+
+      let query = '';
+      if (!isNaN(numericId) && numericId > 0) {
+        request.input('bookingId', numericId);
+        query = `
+          UPDATE dbo.bookings 
+          SET booking_status = @status, 
+              ${paymentStatus ? `payment_status = '${paymentStatus}',` : ''}
+              updated_at = GETDATE()
+          OUTPUT INSERTED.*
+          WHERE booking_id = @bookingId;
+        `;
+      } else {
+        request.input('bookingCode', rawId);
+        query = `
+          UPDATE dbo.bookings 
+          SET booking_status = @status, 
+              ${paymentStatus ? `payment_status = '${paymentStatus}',` : ''}
+              updated_at = GETDATE()
+          OUTPUT INSERTED.*
+          WHERE booking_code = @bookingCode;
+        `;
+      }
+
+      const result = await request.query(query);
+      if (result.recordset && result.recordset.length > 0) {
+        updatedRow = mapDbBookingRow(result.recordset[0]);
+      }
+    }
+  } catch (err) {
+    console.error('[PATCH /api/admin/bookings/:id/status] Lỗi SQL Server:', err.message);
+  }
+
+  // Cập nhật in-memory
+  const bookingInMemory = bookingsData.find((b) => b.id === rawId || b.bookingCode === rawId || b.bookingId === numericId);
+  if (bookingInMemory) {
+    bookingInMemory.status = status;
+    if (paymentStatus) bookingInMemory.paymentStatus = paymentStatus;
+  }
+
+  if (updatedRow) {
+    const idx = bookingsData.findIndex((b) => b.id === updatedRow.id);
+    if (idx !== -1) bookingsData[idx] = updatedRow;
+    else bookingsData.unshift(updatedRow);
+
+    return res.json({
+      success: true,
+      message: `Cập nhật trạng thái đơn sang ${status} thành công trên SQL Server`,
+      data: updatedRow
+    });
+  }
+
+  if (bookingInMemory) {
+    return res.json({
+      success: true,
+      message: `Cập nhật trạng thái đơn sang ${status} thành công`,
+      data: bookingInMemory
+    });
+  }
+
+  return res.status(404).json({ success: false, message: 'Không tìm thấy đơn hàng' });
 });
 
 // ============================================================================

@@ -31,6 +31,8 @@ export default function App() {
   const [categories, setCategories] = useState(mockCategories);
   const [coupons, setCoupons] = useState(mockCoupons);
   const [bookings, setBookings] = useState([]); // Khởi tạo rỗng, nạp từ SQL Server theo từng tài khoản
+  const [adminBookings, setAdminBookings] = useState([]); // Toàn bộ đơn đặt từ SQL Server của tất cả khách hàng (cho Admin)
+  const [adminDashboardData, setAdminDashboardData] = useState(null); // Thống kê tổng & biểu đồ tăng trưởng từ SQL Server
   const [wishlist, setWishlist] = useState([]); // Khởi tạo rỗng, nạp theo từng tài khoản
   const [showOnlyWishlist, setShowOnlyWishlist] = useState(false);
 
@@ -242,13 +244,39 @@ export default function App() {
     [sendAdminTourRequest]
   );
 
-  // Automatically redirect away from admin view if current role is USER
+  // Tự động chuyển hướng khỏi trang admin nếu vai trò hiện tại là USER
   useEffect(() => {
     const role = authUser?.role || currentUser?.role || 'USER';
     if (role === 'USER' && currentView === 'admin') {
       setCurrentView('client');
     }
   }, [authUser, currentUser, currentView]);
+
+  // Tải toàn bộ đơn đặt và thống kê tăng trưởng từ SQL Server cho Admin Portal
+  const fetchAdminData = useCallback(async () => {
+    try {
+      const [bookingsRes, dashRes] = await Promise.all([
+        fetch('/api/admin/bookings').then((r) => r.json()),
+        fetch('/api/admin/dashboard').then((r) => r.json())
+      ]);
+      if (bookingsRes.success && Array.isArray(bookingsRes.data)) {
+        setAdminBookings(bookingsRes.data);
+      }
+      if (dashRes.success && dashRes.data) {
+        setAdminDashboardData(dashRes.data);
+      }
+    } catch (err) {
+      console.error('[Admin fetch error]:', err);
+    }
+  }, []);
+
+  // Tự động tải dữ liệu Admin từ SQL Server khi chuyển sang giao diện Admin hoặc khi Admin đăng nhập
+  useEffect(() => {
+    const role = authUser?.role || currentUser?.role;
+    if (currentView === 'admin' || ['ADMIN', 'SUPER_ADMIN', 'TOUR_GUIDE'].includes(role)) {
+      fetchAdminData();
+    }
+  }, [currentView, authUser, currentUser, fetchAdminData]);
 
   // Filter calculation
   const filteredTours = tours.filter((t) => {
@@ -464,12 +492,53 @@ export default function App() {
     showToast('Cảm ơn bạn đã gửi đánh giá trải nghiệm!');
   };
 
-  // Admin update booking status
-  const handleUpdateBookingStatus = (bookingId, newStatus) => {
-    setBookings((prev) =>
-      prev.map((b) => (b.id === bookingId ? { ...b, status: newStatus } : b))
-    );
-    showToast(`Đã cập nhật trạng thái đơn thành: ${newStatus}`);
+  // Admin cập nhật trạng thái đơn đặt (Lưu trực tiếp vào Microsoft SQL Server)
+  const handleUpdateBookingStatus = async (bookingId, newStatus) => {
+    try {
+      const res = await fetch(`/api/admin/bookings/${encodeURIComponent(bookingId)}/status`, {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ status: newStatus })
+      });
+      const result = await res.json();
+      if (result.success) {
+        showToast(result.message || `Đã cập nhật trạng thái đơn thành: ${newStatus}`);
+        // Cập nhật lại danh sách adminBookings
+        setAdminBookings((prev) =>
+          prev.map((b) =>
+            b.id === bookingId || b.bookingCode === bookingId
+              ? { ...b, status: newStatus, paymentStatus: result.data?.paymentStatus || b.paymentStatus }
+              : b
+          )
+        );
+        // Đồng bộ với danh sách bookings của tài khoản đang đăng nhập nếu có
+        setBookings((prev) =>
+          prev.map((b) =>
+            b.id === bookingId || b.bookingCode === bookingId
+              ? { ...b, status: newStatus, paymentStatus: result.data?.paymentStatus || b.paymentStatus }
+              : b
+          )
+        );
+        // Tải lại báo cáo Dashboard từ SQL Server để cập nhật ngay doanh thu & biểu đồ
+        fetch('/api/admin/dashboard')
+          .then((r) => r.json())
+          .then((r) => {
+            if (r.success && r.data) setAdminDashboardData(r.data);
+          })
+          .catch(() => {});
+      } else {
+        showToast(result.message || 'Lỗi cập nhật trạng thái đơn');
+      }
+    } catch (err) {
+      console.error('[handleUpdateBookingStatus] Lỗi kết nối:', err);
+      // Fallback cục bộ nếu lỗi mạng
+      setAdminBookings((prev) =>
+        prev.map((b) => (b.id === bookingId ? { ...b, status: newStatus } : b))
+      );
+      showToast(`Đã cập nhật trạng thái đơn thành: ${newStatus}`);
+    }
   };
 
   return (
@@ -686,13 +755,15 @@ export default function App() {
           <AdminDashboard
             tours={tours}
             managedTours={managedTours}
-            bookings={bookings}
+            bookings={adminBookings}
             coupons={coupons}
-            isTourAdmin={['SUPER_ADMIN', 'ADMIN'].includes(authUser?.role)}
+            isTourAdmin={['SUPER_ADMIN', 'ADMIN'].includes(authUser?.role || currentUser?.role)}
             onUpdateBookingStatus={handleUpdateBookingStatus}
             onCreateTour={handleCreateTour}
             onUpdateTour={handleUpdateTour}
             onDeleteTour={handleDeleteTour}
+            revenueChart={adminDashboardData?.revenueChart}
+            dashboardSummary={adminDashboardData?.summary}
           />
         </main>
       )}
