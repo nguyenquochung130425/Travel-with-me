@@ -1,18 +1,28 @@
 import React, { useState } from 'react';
 import {
   TrendingUp, Users, ShoppingBag, AlertTriangle, Download,
-  CheckCircle, Clock, Search, Filter, ShieldCheck, Tag, ArrowUpRight
+  CheckCircle, Clock, Search, Filter, ShieldCheck, Tag, ArrowUpRight,
+  Plus, Pencil, Trash2
 } from 'lucide-react';
+import { AdminTourForm } from './AdminTourForm';
 
 export function AdminDashboard({
   tours,
+  managedTours = [],
   bookings,
   coupons,
-  onUpdateBookingStatus
+  onUpdateBookingStatus,
+  isTourAdmin,
+  onCreateTour,
+  onUpdateTour,
+  onDeleteTour
 }) {
   const [activeTab, setActiveTab] = useState('bookings'); // 'overview' | 'bookings' | 'inventory' | 'coupons'
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState('all');
+  const [editingTour, setEditingTour] = useState(null);
+  const [showTourForm, setShowTourForm] = useState(false);
+  const [tourActionError, setTourActionError] = useState('');
 
   // Thống kê tổng
   const totalRevenue = bookings
@@ -55,8 +65,38 @@ export function AdminDashboard({
     document.body.removeChild(link);
   };
 
+  const handleDeleteTour = async (tour) => {
+    if (!window.confirm(`Ngừng kinh doanh tour "${tour.title}"? Tour và lịch sử đơn đặt vẫn được giữ trong hệ thống.`)) return;
+    setTourActionError('');
+    try {
+      await onDeleteTour(tour);
+    } catch (error) {
+      setTourActionError(error.message || 'Không thể ngừng kinh doanh tour.');
+    }
+  };
+
+  const handleSaveTour = async (payload) => {
+    if (editingTour) {
+      await onUpdateTour(editingTour, payload);
+    } else {
+      await onCreateTour(payload);
+    }
+    setShowTourForm(false);
+    setEditingTour(null);
+  };
+
   return (
     <div className="admin-wrapper container animate-fade-in">
+      {showTourForm && (
+        <AdminTourForm
+          tour={editingTour}
+          onSave={handleSaveTour}
+          onClose={() => {
+            setShowTourForm(false);
+            setEditingTour(null);
+          }}
+        />
+      )}
       {/* Top Admin Bar */}
       <div className="admin-header-row">
         <div>
@@ -158,6 +198,14 @@ export function AdminDashboard({
         >
           <span>Quản lý Đơn đặt tour ({bookings.length})</span>
         </button>
+        {isTourAdmin && (
+          <button
+            className={`subtab-btn ${activeTab === 'tours' ? 'active' : ''}`}
+            onClick={() => setActiveTab('tours')}
+          >
+            <span>Quản lý Tour ({managedTours.length})</span>
+          </button>
+        )}
         <button
           className={`subtab-btn ${activeTab === 'inventory' ? 'active' : ''}`}
           onClick={() => setActiveTab('inventory')}
@@ -263,6 +311,89 @@ export function AdminDashboard({
                     </td>
                   </tr>
                 ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {activeTab === 'tours' && isTourAdmin && (
+        <div className="admin-table-card glass-panel">
+          <div className="admin-tour-list-header">
+            <div>
+              <h3>Danh sách tour trong SQL Server</h3>
+              <p>Tour mẫu chỉ để xem; các tour tạo tại đây có thể chỉnh sửa hoặc ngừng kinh doanh.</p>
+            </div>
+            <button
+              className="btn btn-primary btn-sm"
+              onClick={() => {
+                setEditingTour(null);
+                setTourActionError('');
+                setShowTourForm(true);
+              }}
+            >
+              <Plus size={16} /> Thêm tour
+            </button>
+          </div>
+          {tourActionError && <p className="admin-tour-error" role="alert">{tourActionError}</p>}
+          <div className="table-responsive">
+            <table className="admin-table">
+              <thead>
+                <tr>
+                  <th>Tour</th>
+                  <th>Danh mục</th>
+                  <th>Điểm đến</th>
+                  <th>Lịch khởi hành</th>
+                  <th>Giá từ</th>
+                  <th>Trạng thái</th>
+                  <th>Thao tác</th>
+                </tr>
+              </thead>
+              <tbody>
+                {managedTours.map((tour) => {
+                  const minPrice = Math.min(...tour.schedules.map((schedule) => Number(schedule.adultPrice)));
+                  return (
+                    <tr key={tour.id}>
+                      <td>
+                        <div className="admin-tour-name-cell">
+                          <img src={tour.thumbnailUrl} alt="" />
+                          <strong>{tour.title}</strong>
+                        </div>
+                      </td>
+                      <td>{tour.categoryName}</td>
+                      <td>{tour.destinationCity}</td>
+                      <td>{tour.schedules.length}</td>
+                      <td>{Number.isFinite(minPrice) ? `${minPrice.toLocaleString('vi-VN')} đ` : '—'}</td>
+                      <td>
+                        <span className={`admin-tour-status ${tour.isActive ? 'active' : 'inactive'}`}>
+                          {tour.isActive ? 'Đang kinh doanh' : 'Đã ngừng'}
+                        </span>
+                      </td>
+                      <td>
+                        <div className="admin-tour-row-actions">
+                          <button
+                            className="btn btn-outline btn-xs"
+                            onClick={() => {
+                              setEditingTour(tour);
+                              setTourActionError('');
+                              setShowTourForm(true);
+                            }}
+                          >
+                            <Pencil size={14} /> Sửa
+                          </button>
+                          {tour.isActive && (
+                            <button className="btn btn-outline btn-xs admin-tour-delete" onClick={() => handleDeleteTour(tour)}>
+                              <Trash2 size={14} /> Ngừng
+                            </button>
+                          )}
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
+                {managedTours.length === 0 && (
+                  <tr><td colSpan="7" className="admin-tour-empty">Chưa có tour nào trong database. Chọn “Thêm tour” để bắt đầu.</td></tr>
+                )}
               </tbody>
             </table>
           </div>

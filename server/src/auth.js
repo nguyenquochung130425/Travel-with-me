@@ -102,6 +102,15 @@ export function requireAuth(req, res, next) {
   }
 }
 
+export function requireAdmin(req, res, next) {
+  requireAuth(req, res, () => {
+    if (req.user.role !== 'SUPER_ADMIN' && req.user.role !== 'ADMIN') {
+      return res.status(403).json({ success: false, message: 'Chỉ quản trị viên mới có quyền thực hiện thao tác này' });
+    }
+    next();
+  });
+}
+
 // ─── POST /api/auth/register ─────────────────────────────────────────────────
 router.post('/register', async (req, res) => {
   const { username, fullName, email, password } = req.body;
@@ -206,7 +215,7 @@ router.post('/login', async (req, res) => {
       .input('email', sql.NVarChar, email.trim().toLowerCase())
       .query(`
         SELECT u.user_id, u.full_name, u.email, u.password_hash,
-               u.auth_provider, u.is_active, ISNULL(u.elo, 1000) AS elo,
+               u.auth_provider, u.is_active, 1000 AS elo,
                r.role_name
         FROM dbo.users u
         INNER JOIN dbo.roles r ON u.role_id = r.role_id

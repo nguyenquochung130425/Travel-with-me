@@ -16,6 +16,20 @@ function validatePw(pw) {
   return typeof pw === 'string' && pw.length >= 8 && /[a-zA-Z]/.test(pw) && /[0-9]/.test(pw);
 }
 
+async function readApiResponse(response) {
+  const text = await response.text();
+  let data;
+  try {
+    data = text ? JSON.parse(text) : null;
+  } catch {
+    throw new Error(`Máy chủ trả về dữ liệu không hợp lệ (HTTP ${response.status}). Vui lòng thử lại sau.`);
+  }
+  if (!data) {
+    throw new Error(`Máy chủ không trả nội dung (HTTP ${response.status}). Vui lòng thử lại sau.`);
+  }
+  return data;
+}
+
 // ─── Shared Sub-components (defined outside to avoid re-mounting on keystrokes) ─
 function Field({ icon: Icon, type = 'text', placeholder, value, onChange, right }) {
   return (
@@ -80,7 +94,7 @@ export function AuthModal({ isOpen, initialView = VIEW.LOGIN, onClose, onLoginSu
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email: form.email, password: form.password })
       });
-      const data = await r.json();
+      const data = await readApiResponse(r);
       if (!data.success) throw new Error(data.message);
       localStorage.setItem('twm_token', data.data.token);
       localStorage.setItem('twm_user', JSON.stringify(data.data));
@@ -107,7 +121,7 @@ export function AuthModal({ isOpen, initialView = VIEW.LOGIN, onClose, onLoginSu
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ fullName: form.fullName, email: form.email, password: form.password })
       });
-      const data = await r.json();
+      const data = await readApiResponse(r);
       if (!data.success) throw new Error(data.message);
       localStorage.setItem('twm_token', data.data.token);
       localStorage.setItem('twm_user', JSON.stringify(data.data));
@@ -131,7 +145,7 @@ export function AuthModal({ isOpen, initialView = VIEW.LOGIN, onClose, onLoginSu
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email: form.email })
       });
-      const data = await r.json();
+      const data = await readApiResponse(r);
       if (!data.success) throw new Error(data.message);
       setSuccess(data.message);
     } catch (err) {
@@ -154,7 +168,7 @@ export function AuthModal({ isOpen, initialView = VIEW.LOGIN, onClose, onLoginSu
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ token: form.token, email: form.email, newPassword: form.newPassword })
       });
-      const data = await r.json();
+      const data = await readApiResponse(r);
       if (!data.success) throw new Error(data.message);
       setView(VIEW.DONE);
     } catch (err) {
