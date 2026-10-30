@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
+import { Sidebar } from './components/Sidebar';
 import { Navbar } from './components/Navbar';
 import { HeroSection } from './components/HeroSection';
 import { FilterBar } from './components/FilterBar';
@@ -32,6 +33,38 @@ export default function App() {
   const [wishlist, setWishlist] = useState([]); // Khởi tạo rỗng, nạp theo từng tài khoản
   const [showOnlyWishlist, setShowOnlyWishlist] = useState(false);
 
+  // Sidebar Left Navigation State (có thể đóng/mở, lưu vào localStorage)
+  const [isSidebarOpen, setIsSidebarOpen] = useState(() => {
+    try {
+      const saved = localStorage.getItem('twm_sidebar_open');
+      return saved !== null ? JSON.parse(saved) : true;
+    } catch {
+      return true;
+    }
+  });
+
+  const toggleSidebar = useCallback(() => {
+    setIsSidebarOpen((prev) => {
+      const next = !prev;
+      try {
+        localStorage.setItem('twm_sidebar_open', JSON.stringify(next));
+      } catch {}
+      return next;
+    });
+  }, []);
+
+  // Hỗ trợ phím tắt tiện lợi: Ctrl + B hoặc Cmd + B để ẩn/hiện menu
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'b') {
+        e.preventDefault();
+        toggleSidebar();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [toggleSidebar]);
+
   // Toast notification
   const [toastMessage, setToastMessage] = useState('');
   const showToast = useCallback((msg) => {
@@ -53,7 +86,7 @@ export default function App() {
   const storedUser = (() => { try { return JSON.parse(localStorage.getItem('twm_user')); } catch { return null; } })();
   const [authUser, setAuthUser] = useState(storedUser); // real logged-in user (JWT)
   const [showAuth, setShowAuth] = useState(false);       // show login/register modal
-  const [showPreloader, setShowPreloader] = useState(false); // full-screen preloader
+  const [showPreloader, setShowPreloader] = useState(true); // Full-screen count-up preloader khi vào trang web
 
   // Đồng bộ Wishlist & Lịch sử Chuyến Đi theo tài khoản đăng nhập (userId)
   useEffect(() => {
@@ -92,7 +125,7 @@ export default function App() {
   const handleLoginSuccess = useCallback((userData) => {
     setAuthUser(userData);
     setShowAuth(false);
-    setShowPreloader(true); // trigger full-screen count-up preloader
+    // Đã bỏ preloader khi đăng nhập theo yêu cầu của người dùng
     if (userData?.role) {
       setCurrentUser((prev) => ({
         ...prev,
@@ -379,8 +412,8 @@ export default function App() {
   };
 
   return (
-    <div className="travel-app-root">
-      {/* Full-screen count-up preloader on login success */}
+    <div className={`travel-app-root ${isSidebarOpen ? 'layout-sidebar-open' : 'layout-sidebar-closed'}`}>
+      {/* Full-screen count-up preloader khi vào trang web */}
       {showPreloader && (
         <SitePreloader onDone={() => setShowPreloader(false)} />
       )}
@@ -399,11 +432,15 @@ export default function App() {
         </div>
       )}
 
-      {/* Top Navbar */}
-      <Navbar
+      {/* Left Sidebar Menu Navigation */}
+      <Sidebar
+        isOpen={isSidebarOpen}
+        onToggle={toggleSidebar}
+        onClose={() => setIsSidebarOpen(false)}
         currentView={currentView}
         setCurrentView={setCurrentView}
         wishlistCount={wishlist.length}
+        bookingsCount={bookings.length}
         openMyTrips={() => {
           if (!authUser) {
             showToast('Vui lòng đăng nhập để xem lịch sử chuyến đi của bạn!');
@@ -442,9 +479,56 @@ export default function App() {
         showToast={showToast}
       />
 
-      {/* MAIN VIEW: CLIENT OR ADMIN */}
-      {currentView === 'client' ? (
-        <main>
+      {/* Main Viewport Container */}
+      <div className="app-main-viewport">
+        {/* Top Navbar */}
+        <Navbar
+          currentView={currentView}
+          setCurrentView={setCurrentView}
+          wishlistCount={wishlist.length}
+          openMyTrips={() => {
+            if (!authUser) {
+              showToast('Vui lòng đăng nhập để xem lịch sử chuyến đi của bạn!');
+              setShowAuth(true);
+              return;
+            }
+            setShowMyTrips(true);
+          }}
+          openWishlist={() => {
+            if (!authUser) {
+              showToast('Vui lòng đăng nhập để xem danh sách tour yêu thích!');
+              setShowAuth(true);
+              return;
+            }
+            if (wishlist.length === 0) {
+              showToast('Danh sách yêu thích đang trống. Hãy nhấn thả tim ở các tour để lưu nhé!');
+              return;
+            }
+            setShowOnlyWishlist(true);
+            showToast(`Đang hiển thị ${wishlist.length} tour trong danh sách yêu thích của bạn`);
+            const el = document.getElementById('catalog-section');
+            if (el) el.scrollIntoView({ behavior: 'smooth' });
+          }}
+          currentUser={currentUser}
+          authUser={authUser}
+          openRoleModal={() => {
+            const role = authUser?.role || currentUser?.role;
+            if (role === 'SUPER_ADMIN' || role === 'ADMIN') {
+              setShowRoleModal(true);
+            } else {
+              showToast('Chỉ tài khoản Quản trị viên (Admin) mới có quyền truy cập bảng phân quyền');
+            }
+          }}
+          openAuth={() => setShowAuth(true)}
+          onLogout={handleLogout}
+          showToast={showToast}
+          isSidebarOpen={isSidebarOpen}
+          onToggleSidebar={toggleSidebar}
+        />
+
+        {/* MAIN VIEW: CLIENT OR ADMIN */}
+        {currentView === 'client' ? (
+          <main>
           {/* Hero Section with Smart Search */}
           <HeroSection
             filters={filters}
@@ -671,6 +755,7 @@ export default function App() {
         }}
         onNotify={showToast}
       />
+      </div> {/* Kết thúc app-main-viewport */}
     </div>
   );
 }

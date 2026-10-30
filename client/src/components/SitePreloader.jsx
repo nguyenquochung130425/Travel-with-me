@@ -57,8 +57,6 @@ export function SitePreloader({ onDone }) {
       <div className="spl-hf spl-a"></div>
       {/* Curtain – bottom half */}
       <div className="spl-hf spl-b"></div>
-      {/* Curtain – bottom half */}
-      <div className="spl-hf spl-b"></div>
 
       {/* Loading overlay content */}
       <div

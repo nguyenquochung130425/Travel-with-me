@@ -1,5 +1,5 @@
 import React from 'react';
-import { Compass, Heart, Briefcase, Shield, User, Sparkles, Crown, Key, LogIn, LogOut, Award } from 'lucide-react';
+import { Compass, Heart, Briefcase, Shield, User, Sparkles, Crown, Key, LogIn, LogOut, Award, Menu, PanelLeftClose, PanelLeftOpen } from 'lucide-react';
 
 export function Navbar({
   currentView,
@@ -12,7 +12,9 @@ export function Navbar({
   openRoleModal,
   openAuth,
   onLogout,
-  showToast
+  showToast,
+  isSidebarOpen,
+  onToggleSidebar
 }) {
   const effectiveRole = authUser?.role || currentUser?.role || 'USER';
   const isAdmin = effectiveRole === 'SUPER_ADMIN' || effectiveRole === 'ADMIN';
@@ -20,7 +22,6 @@ export function Navbar({
 
   const handleToggleView = () => {
     if (currentView === 'client') {
-      // Trying to enter Admin Portal
       if (!canAccessAdmin) {
         showToast('🔒 Khách hàng (USER) không có quyền truy cập Kênh Quản trị!');
         return;
@@ -53,41 +54,44 @@ export function Navbar({
 
   return (
     <header className="navbar-wrapper">
-      <div className="container navbar-container">
-        {/* Brand Logo */}
-        <div className="brand-logo" onClick={() => setCurrentView('client')}>
-          <div className="logo-icon-box">
-            <Compass className="logo-compass animate-spin-slow" size={28} />
-          </div>
-          <div>
-            <div className="brand-name">
-              TRAVEL <span className="brand-highlight">WITH ME</span>
+      <div className="navbar-container">
+        {/* Left Section: Sidebar Toggle & Brand */}
+        <div className="navbar-left-group">
+          <button
+            className="sidebar-toggle-trigger"
+            onClick={onToggleSidebar}
+            title={isSidebarOpen ? "Ẩn thanh menu bên trái (Ctrl+B)" : "Hiện thanh menu bên trái (Ctrl+B)"}
+            aria-label="Toggle Sidebar"
+          >
+            {isSidebarOpen ? <PanelLeftClose size={20} /> : <Menu size={22} />}
+            <span className="trigger-label hidden-mobile">
+              {isSidebarOpen ? 'Ẩn Menu' : 'Hiện Menu'}
+            </span>
+          </button>
+
+          {/* Brand Logo (Always visible or when sidebar is collapsed) */}
+          <div className="brand-logo" onClick={() => setCurrentView('client')}>
+            <div className="logo-icon-box">
+              <Compass className="logo-compass animate-spin-slow" size={26} />
             </div>
-            <div className="brand-slogan">Trải Nghiệm Du Lịch Đích Thực</div>
+            <div className="brand-text-block">
+              <div className="brand-name">
+                TRAVEL <span className="brand-highlight">WITH ME</span>
+              </div>
+              <div className="brand-slogan hidden-mobile">Trải Nghiệm Du Lịch Đích Thực</div>
+            </div>
           </div>
         </div>
 
-        {/* Center Nav Links */}
-        <nav className="nav-menu">
-          <button
-            className={`nav-link ${currentView === 'client' ? 'active' : ''}`}
-            onClick={() => setCurrentView('client')}
-          >
-            Khám Phá Tour
-          </button>
-          <a href="#featured-section" className="nav-link">
-            Tour Bán Chạy
-          </a>
-          <a href="#categories-section" className="nav-link">
-            Chủ Đề Du Lịch
-          </a>
-          <button className="nav-link highlight-tag" onClick={openMyTrips}>
-            <Briefcase size={16} />
-            <span>Chuyến Đi Của Tôi</span>
-          </button>
-        </nav>
+        {/* Center Section: Quick Highlights */}
+        <div className="navbar-center-info hidden-tablet">
+          <div className="nav-tag-pill">
+            <Sparkles size={14} className="text-amber" />
+            <span>Ưu đãi mùa hè giảm tới 30% cho tour gia đình</span>
+          </div>
+        </div>
 
-        {/* Action Controls */}
+        {/* Right Section: Action Controls */}
         <div className="nav-actions">
           {/* Wishlist Button */}
           <button
@@ -111,12 +115,12 @@ export function Navbar({
               {currentView === 'client' ? (
                 <>
                   <Shield size={16} />
-                  <span>Kênh Quản Trị</span>
+                  <span className="hidden-mobile">Kênh Quản Trị</span>
                 </>
               ) : (
                 <>
                   <Sparkles size={16} />
-                  <span>Xem Giao Diện Khách</span>
+                  <span className="hidden-mobile">Giao Diện Khách</span>
                 </>
               )}
             </button>
@@ -137,10 +141,10 @@ export function Navbar({
                     <BadgeIcon size={18} />
                   )}
                 </div>
-                <div className="user-meta">
+                <div className="user-meta hidden-mobile">
                   <span className="user-name">{displayName}</span>
                   <div className="user-sub-pills">
-                    <span className="user-elo-pill" title={`Hệ số uy tín du lịch: ${eloScore} Elo`}>
+                    <span className="user-elo-pill" title={`Hệ số uy tín: ${eloScore} Elo`}>
                       <Award size={11} />
                       <span>{eloScore} Elo</span>
                     </span>
@@ -149,7 +153,7 @@ export function Navbar({
                     </span>
                   </div>
                 </div>
-                {isAdmin && <Key size={14} className="key-icon-hint text-amber-500" title="Quản lý vai trò (RBAC)" />}
+                {isAdmin && <Key size={14} className="key-icon-hint text-amber-500 hidden-mobile" title="Quản lý vai trò (RBAC)" />}
               </div>
 
               {/* Logout Button */}
@@ -159,7 +163,7 @@ export function Navbar({
                 title="Đăng xuất khỏi tài khoản"
               >
                 <LogOut size={16} />
-                <span className="logout-text">Đăng Xuất</span>
+                <span className="logout-text hidden-mobile">Đăng Xuất</span>
               </button>
             </div>
           ) : (
