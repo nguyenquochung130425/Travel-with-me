@@ -2,6 +2,7 @@ import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import './index.css'
 import App from './App.jsx'
+import { LocaleProvider } from './context/LocaleContext.jsx'
 
 // Khóa zoom tối đa 100% & ngăn chặn zoom ngoài ý muốn (Trackpad pinch, Ctrl + Scroll, Ctrl + '+')
 if (typeof window !== 'undefined') {
@@ -68,6 +69,8 @@ if (typeof window !== 'undefined') {
 
 createRoot(document.getElementById('root')).render(
   <StrictMode>
-    <App />
+    <LocaleProvider>
+      <App />
+    </LocaleProvider>
   </StrictMode>,
 )

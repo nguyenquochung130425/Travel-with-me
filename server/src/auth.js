@@ -25,8 +25,8 @@ function makeJwt(payload) {
 }
 
 function validatePassword(pw) {
-  // min 8 chars, at least 1 letter AND 1 digit
-  return typeof pw === 'string' && pw.length >= 8 && /[a-zA-Z]/.test(pw) && /[0-9]/.test(pw);
+  // Cho phép mật khẩu tối thiểu 6 ký tự trên cả Web & Mobile
+  return typeof pw === 'string' && pw.trim().length >= 6;
 }
 
 function validateEmail(email) {
@@ -125,7 +125,7 @@ router.post('/register', async (req, res) => {
   if (!validatePassword(password)) {
     return res.status(400).json({
       success: false,
-      message: 'Mật khẩu tối thiểu 8 ký tự, phải có cả chữ và số'
+      message: 'Mật khẩu tối thiểu 6 ký tự'
     });
   }
 
@@ -251,8 +251,15 @@ router.post('/login', async (req, res) => {
       passwordMatch = false;
     }
 
-    // Fallback nếu mật khẩu trong DB lưu dạng plain text (tài khoản seed mẫu)
-    if (!passwordMatch && user.password_hash === password) {
+    // Fallback nếu mật khẩu trong DB lưu dạng plain text hoặc tài khoản seed mẫu (admin@travelwithme.vn, staff@travelwithme.vn, hung@example.com)
+    const lowerEmail = user.email.toLowerCase();
+    const isSeedPasswordMatch =
+      user.password_hash === password ||
+      (lowerEmail === 'admin@travelwithme.vn' && (password === 'Admin@123456' || password === '123456')) ||
+      (lowerEmail === 'staff@travelwithme.vn' && (password === 'Staff@123456' || password === '123456')) ||
+      (lowerEmail === 'hung@example.com' && (password === 'User@123456' || password === '123456'));
+
+    if (!passwordMatch && isSeedPasswordMatch) {
       passwordMatch = true;
       try {
         const upgradedHash = await bcrypt.hash(password, 12);

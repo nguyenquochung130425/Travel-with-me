@@ -3,6 +3,7 @@ import express from 'express';
 import cors from 'cors';
 import { getDbPool, sql } from './db.js';
 import authRouter, { requireAdmin } from './auth.js';
+import { cache, cacheMiddleware } from './cache.js';
 import {
   mockCategories,
   mockTours,
@@ -397,6 +398,7 @@ async function executeTourWrite(req, res, operation) {
     await saveTourImages(transaction, tourId, req.body.albumImages || []);
     await saveTourItineraries(transaction, tourId, req.body.itineraries || []);
     await transaction.commit();
+    cache.del('tours'); // Xóa cache danh sách tour sau khi cập nhật
     return res.json({ success: true, message: 'Lưu tour thành công' });
   } catch (err) {
     if (transactionStarted) {
@@ -477,8 +479,8 @@ getDbPool().then(async (pool) => {
   }
 }).catch(() => {});
 
-// 1. Lấy danh sách danh mục
-app.get('/api/categories', async (req, res) => {
+// 1. Lấy danh sách danh mục (Áp dụng Cache 5 phút)
+app.get('/api/categories', cacheMiddleware(300, 'categories'), async (req, res) => {
   try {
     const pool = await getDbPool();
     const result = await pool.request().query(`
@@ -502,8 +504,8 @@ app.get('/api/categories', async (req, res) => {
   }
 });
 
-// 2. Lấy danh sách Tours (hỗ trợ lọc & sắp xếp, ưu tiên SQL Server, loại bỏ trùng lặp)
-app.get('/api/tours', async (req, res) => {
+// 2. Lấy danh sách Tours (Áp dụng Cache 60s, hỗ trợ lọc & sắp xếp, ưu tiên SQL Server, loại bỏ trùng lặp)
+app.get('/api/tours', cacheMiddleware(60, 'tours'), async (req, res) => {
   const {
     keyword,
     departureCity,
@@ -1161,47 +1163,816 @@ app.post('/api/bookings/:id/cancel', async (req, res) => {
   });
 });
 
-// 9. Gửi đánh giá cho tour đã hoàn thành
-app.post('/api/reviews', (req, res) => {
-  const { bookingId, tourId, rating, comment, photos, authorName } = req.body;
+// ─────────────────────────────────────────────────────────────────────────────
+// 9. PHÂN HỆ ĐÁNH GIÁ & KIỂM DUYỆT (ADVANCED REVIEWS & MODERATION)
+// ─────────────────────────────────────────────────────────────────────────────
 
-  // Kiểm tra đơn đã hoàn thành chưa
-  const booking = bookingsData.find((b) => b.id === bookingId);
-  if (!booking || booking.status !== 'COMPLETED') {
-    return res.status(403).json({
+// 9.1. Lấy danh sách đánh giá của Tour (Chỉ trả về các đánh giá đã kiểm duyệt is_visible = 1)
+app.get('/api/reviews', async (req, res) => {
+  const { tourId } = req.query;
+  try {
+    const pool = await getDbPool();
+    if (pool) {
+      let query = `
+        SELECT r.review_id, r.tour_id, r.booking_id, r.user_id, r.author_name, r.author_avatar,
+               r.rating, r.comment, r.is_visible, r.admin_reply, r.admin_reply_at, r.created_at
+        FROM dbo.reviews r
+        WHERE r.is_visible = 1
+      `;
+      if (tourId) {
+        query += ` AND (r.tour_id = @tourId OR r.tour_id = @rawTourId)`;
+      }
+      query += ` ORDER BY r.created_at DESC;`;
+
+      const request = pool.request();
+      if (tourId) {
+        const rawId = String(tourId).replace(/^(dbtour-|tour-)/, '');
+        request.input('tourId', sql.VarChar(100), String(tourId));
+        request.input('rawTourId', sql.VarChar(100), rawId);
+      }
+
+      const revResult = await request.query(query);
+      const imagesResult = await pool.request().query('SELECT review_id, image_url FROM dbo.review_images;');
+
+      const sqlReviews = revResult.recordset.map((r) => {
+        const photos = imagesResult.recordset
+          .filter((img) => img.review_id === r.review_id)
+          .map((img) => img.image_url);
+
+        return {
+          id: `rev-${r.review_id}`,
+          reviewId: r.review_id,
+          tourId: r.tour_id,
+          bookingId: r.booking_id,
+          userId: r.user_id,
+          authorName: r.author_name,
+          authorAvatar: r.author_avatar || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=150&q=80',
+          rating: Number(r.rating),
+          comment: r.comment,
+          photos,
+          adminReply: r.admin_reply || null,
+          adminReplyAt: r.admin_reply_at ? new Date(r.admin_reply_at).toLocaleDateString('vi-VN') : null,
+          date: new Date(r.created_at).toLocaleDateString('vi-VN'),
+          isVisible: Boolean(r.is_visible),
+          isVerifiedCompleted: true
+        };
+      });
+
+      if (sqlReviews.length > 0) {
+        return res.json({ success: true, data: sqlReviews });
+      }
+    }
+  } catch (err) {
+    console.error('[GET /api/reviews] Lỗi SQL Server:', err.message);
+  }
+
+  // Fallback in-memory
+  let list = reviewsData.filter((r) => r.isVisible !== false);
+  if (tourId) {
+    list = list.filter((r) => r.tourId === tourId);
+  }
+  res.json({ success: true, data: list });
+});
+
+// 9.2. Du khách gửi đánh giá (Chính sách minh bạch: Bắt buộc đơn COMPLETED & chống spam)
+app.post('/api/reviews', async (req, res) => {
+  const { bookingId, tourId, rating, comment, photos, authorName, authorAvatar, userId } = req.body;
+
+  if (!bookingId || !rating || !comment) {
+    return res.status(400).json({ success: false, message: 'Vui lòng cung cấp đầy đủ mã đơn đặt chỗ, số sao và nhận xét.' });
+  }
+
+  // 1. Kiểm tra đơn đặt tour
+  let booking = bookingsData.find(
+    (b) => b.id === bookingId || b.bookingCode === bookingId || String(b.bookingId) === String(bookingId)
+  );
+
+  try {
+    const pool = await getDbPool();
+    if (!booking && pool) {
+      const cleanBkId = String(bookingId).replace(/^bk-/, '');
+      const bkRes = await pool.request()
+        .input('bkId', sql.VarChar(100), cleanBkId)
+        .input('bkCode', sql.VarChar(100), String(bookingId))
+        .query(`SELECT * FROM dbo.bookings WHERE booking_id = @bkId OR booking_code = @bkCode;`);
+      if (bkRes.recordset.length > 0) {
+        booking = mapDbBookingRow(bkRes.recordset[0]);
+      }
+    }
+  } catch (e) {
+    console.warn('[Check Booking Review] Lỗi tra cứu:', e.message);
+  }
+
+  if (!booking) {
+    return res.status(404).json({
       success: false,
-      message: 'Chỉ du khách đã hoàn thành chuyến đi mới có thể gửi đánh giá'
+      message: 'Không tìm thấy đơn đặt tour tương ứng để đánh giá.'
     });
   }
 
+  // Bắt buộc trạng thái COMPLETED
+  if (booking.status !== 'COMPLETED') {
+    return res.status(403).json({
+      success: false,
+      message: 'Chính sách minh bạch: Chỉ những chuyến đi ở trạng thái ĐÃ HOÀN THÀNH (Completed) mới được phép gửi đánh giá nhằm ngăn chặn đánh giá giả mạo.'
+    });
+  }
+
+  // 2. Chống spam: 1 booking chỉ được đánh giá 1 lần
+  try {
+    const pool = await getDbPool();
+    if (pool) {
+      const targetBkId = String(booking.bookingId || booking.id);
+      const targetBkCode = String(booking.bookingCode || '');
+      const dupCheck = await pool.request()
+        .input('bookingId', sql.VarChar(100), targetBkId)
+        .input('bookingCode', sql.VarChar(100), targetBkCode)
+        .query(`SELECT review_id FROM dbo.reviews WHERE booking_id = @bookingId OR booking_id = @bookingCode;`);
+      
+      if (dupCheck.recordset.length > 0) {
+        return res.status(400).json({
+          success: false,
+          message: 'Đơn đặt tour này đã gửi đánh giá trước đó. Mỗi chuyến đi chỉ được đánh giá duy nhất 1 lần.'
+        });
+      }
+
+      const effectiveTourId = String(tourId || booking.tourId || 'tour-1');
+      const effectiveUserId = String(userId || booking.userId || '3');
+      const effectiveAuthor = authorName || booking.contactName || 'Du khách thân thiết';
+      const effectiveAvatar = authorAvatar || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=150&q=80';
+
+      const insRes = await pool.request()
+        .input('tourId', sql.VarChar(100), effectiveTourId)
+        .input('userId', sql.VarChar(100), effectiveUserId)
+        .input('bookingId', sql.VarChar(100), targetBkId)
+        .input('rating', sql.Int, Number(rating) || 5)
+        .input('comment', sql.NVarChar(sql.MAX), String(comment).trim())
+        .input('authorName', sql.NVarChar(150), effectiveAuthor)
+        .input('authorAvatar', sql.NVarChar(500), effectiveAvatar)
+        .query(`
+          INSERT INTO dbo.reviews (tour_id, user_id, booking_id, rating, comment, is_visible, author_name, author_avatar, created_at)
+          OUTPUT INSERTED.review_id
+          VALUES (@tourId, @userId, @bookingId, @rating, @comment, 1, @authorName, @authorAvatar, GETDATE());
+        `);
+
+      const newRevId = insRes.recordset[0].review_id;
+
+      if (Array.isArray(photos)) {
+        for (const p of photos) {
+          if (p && typeof p === 'string' && p.trim()) {
+            await pool.request()
+              .input('revId', sql.BigInt, newRevId)
+              .input('imgUrl', sql.NVarChar(500), p.trim())
+              .query(`INSERT INTO dbo.review_images (review_id, image_url) VALUES (@revId, @imgUrl);`);
+          }
+        }
+      }
+
+      // Tạo thông báo trong Notification Hub
+      await pool.request()
+        .input('userId', sql.VarChar(100), effectiveUserId)
+        .input('type', sql.VarChar(50), 'REVIEW_SUCCESS')
+        .input('channel', sql.VarChar(20), 'IN_APP')
+        .input('title', sql.NVarChar(200), 'Đánh giá chuyến đi thành công!')
+        .input('message', sql.NVarChar(sql.MAX), `Cảm ơn bạn đã gửi đánh giá ${rating}★ cho chuyến đi "${booking.tourTitle}". Đánh giá của bạn đã được xuất bản công khai!`)
+        .input('dataPayload', sql.NVarChar(sql.MAX), JSON.stringify({ reviewId: newRevId, tourId: effectiveTourId }))
+        .query(`
+          INSERT INTO dbo.notifications (user_id, type, channel, title, message, data_payload, is_read, created_at)
+          VALUES (@userId, @type, @channel, @title, @message, @dataPayload, 0, GETDATE());
+        `);
+
+      cache.del('reviews');
+      cache.del('tours');
+
+      return res.status(201).json({
+        success: true,
+        message: 'Cảm ơn bạn đã gửi đánh giá chuyến đi! Đánh giá đã được lưu vào hệ thống.',
+        data: {
+          id: `rev-${newRevId}`,
+          reviewId: newRevId,
+          tourId: effectiveTourId,
+          rating: Number(rating),
+          comment,
+          authorName: effectiveAuthor,
+          photos: photos || [],
+          date: new Date().toLocaleDateString('vi-VN'),
+          isVerifiedCompleted: true
+        }
+      });
+    }
+  } catch (err) {
+    console.error('[POST /api/reviews] Lỗi lưu review SQL Server:', err.message);
+  }
+
+  // Fallback in-memory
   const newReview = {
     id: `rev-${Date.now()}`,
-    tourId,
-    bookingId,
+    tourId: tourId || booking.tourId,
+    bookingId: booking.id,
     authorName: authorName || booking.contactName,
-    authorAvatar: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=150&q=80',
+    authorAvatar: authorAvatar || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=150&q=80',
     rating: Number(rating) || 5,
     date: new Date().toLocaleDateString('vi-VN'),
     comment,
-    photos: photos || []
+    photos: photos || [],
+    isVisible: true,
+    isVerifiedCompleted: true
   };
-
   reviewsData.unshift(newReview);
-
-  // Cập nhật điểm rating của tour
-  const tour = toursData.find((t) => t.id === tourId);
-  if (tour) {
-    const tourRevs = reviewsData.filter((r) => r.tourId === tourId);
-    const avg = tourRevs.reduce((acc, cur) => acc + cur.rating, 0) / tourRevs.length;
-    tour.ratingAverage = Number(avg.toFixed(1));
-    tour.reviewCount = tourRevs.length;
-  }
 
   res.status(201).json({
     success: true,
     message: 'Cảm ơn bạn đã gửi đánh giá chuyến đi!',
     data: newReview
   });
+});
+
+// 9.3. Admin: Lấy toàn bộ danh sách đánh giá phục vụ kiểm duyệt (Review Moderation)
+app.get('/api/admin/reviews', async (req, res) => {
+  try {
+    const pool = await getDbPool();
+    if (pool) {
+      const result = await pool.request().query(`
+        SELECT r.review_id, r.tour_id, r.booking_id, r.user_id, r.author_name, r.author_avatar,
+               r.rating, r.comment, r.is_visible, r.admin_reply, r.admin_reply_at, r.created_at,
+               b.tour_title, b.booking_code
+        FROM dbo.reviews r
+        LEFT JOIN dbo.bookings b ON (r.booking_id = CAST(b.booking_id AS VARCHAR(100)) OR r.booking_id = b.booking_code)
+        ORDER BY r.created_at DESC;
+      `);
+      const imagesResult = await pool.request().query('SELECT review_id, image_url FROM dbo.review_images;');
+
+      const reviews = result.recordset.map((r) => {
+        const photos = imagesResult.recordset
+          .filter((img) => img.review_id === r.review_id)
+          .map((img) => img.image_url);
+
+        return {
+          id: `rev-${r.review_id}`,
+          reviewId: r.review_id,
+          tourId: r.tour_id,
+          tourTitle: r.tour_title || 'Tour du lịch Travel With Me',
+          bookingId: r.booking_id,
+          bookingCode: r.booking_code || r.booking_id,
+          userId: r.user_id,
+          authorName: r.author_name,
+          authorAvatar: r.author_avatar,
+          rating: Number(r.rating),
+          comment: r.comment,
+          isVisible: Boolean(r.is_visible),
+          adminReply: r.admin_reply || null,
+          adminReplyAt: r.admin_reply_at ? new Date(r.admin_reply_at).toLocaleString('vi-VN') : null,
+          photos,
+          date: new Date(r.created_at).toLocaleDateString('vi-VN')
+        };
+      });
+
+      return res.json({ success: true, data: reviews });
+    }
+  } catch (err) {
+    console.error('[GET /api/admin/reviews] Lỗi SQL Server:', err.message);
+  }
+
+  // Fallback
+  res.json({ success: true, data: reviewsData });
+});
+
+// 9.4. Admin: Kiểm duyệt ẩn / hiện đánh giá
+app.patch('/api/admin/reviews/:id/visibility', async (req, res) => {
+  const { id } = req.params;
+  const { isVisible } = req.body;
+  const cleanId = String(id).replace(/^rev-/, '');
+
+  try {
+    const pool = await getDbPool();
+    if (pool) {
+      await pool.request()
+        .input('revId', sql.BigInt, cleanId)
+        .input('visible', sql.Bit, Boolean(isVisible))
+        .query(`UPDATE dbo.reviews SET is_visible = @visible WHERE review_id = @revId;`);
+
+      cache.del('reviews');
+      cache.del('tours');
+      return res.json({
+        success: true,
+        message: isVisible ? 'Đã hiển thị đánh giá công khai' : 'Đã ẩn đánh giá khỏi giao diện website'
+      });
+    }
+  } catch (err) {
+    console.error('[PATCH /api/admin/reviews/:id/visibility] Lỗi:', err.message);
+  }
+
+  // Fallback in-memory
+  const found = reviewsData.find((r) => r.id === id || String(r.reviewId) === cleanId);
+  if (found) found.isVisible = Boolean(isVisible);
+  res.json({ success: true, message: isVisible ? 'Đã hiển thị đánh giá' : 'Đã ẩn đánh giá' });
+});
+
+// 9.5. Admin: Phản hồi đánh giá của khách hàng (Official Admin Reply)
+app.post('/api/admin/reviews/:id/reply', async (req, res) => {
+  const { id } = req.params;
+  const replyContent = req.body.reply || req.body.adminReply;
+  const cleanId = String(id).replace(/^rev-/, '');
+
+  if (!replyContent || !String(replyContent).trim()) {
+    return res.status(400).json({ success: false, message: 'Nội dung phản hồi không được để trống' });
+  }
+
+  try {
+    const pool = await getDbPool();
+    if (pool) {
+      await pool.request()
+        .input('revId', sql.BigInt, cleanId)
+        .input('reply', sql.NVarChar(sql.MAX), String(replyContent).trim())
+        .query(`
+          UPDATE dbo.reviews
+          SET admin_reply = @reply, admin_reply_at = GETDATE()
+          WHERE review_id = @revId;
+        `);
+
+      cache.del('reviews');
+      cache.del('tours');
+      return res.json({
+        success: true,
+        message: 'Đã gửi phản hồi chính thức từ Ban Quản Trị thành công!',
+        data: { adminReply: String(replyContent).trim(), adminReplyAt: new Date().toLocaleDateString('vi-VN') }
+      });
+    }
+  } catch (err) {
+    console.error('[POST /api/admin/reviews/:id/reply] Lỗi:', err.message);
+  }
+
+  // Fallback
+  const found = reviewsData.find((r) => r.id === id || String(r.reviewId) === cleanId);
+  if (found) {
+    found.adminReply = String(replyContent).trim();
+    found.adminReplyAt = new Date().toLocaleDateString('vi-VN');
+  }
+  res.json({ success: true, message: 'Đã gửi phản hồi' });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 10. PHÂN HỆ CỘNG ĐỒNG DU LỊCH & NHẬT KÝ HÀNH TRÌNH (TRAVEL BLOG UGC)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// 10.1. Lấy danh sách bài viết nhật ký hành trình cộng đồng
+app.get('/api/community/posts', cacheMiddleware(20, 'community'), async (req, res) => {
+  const { tag, tourId, keyword } = req.query;
+  try {
+    const pool = await getDbPool();
+    if (pool) {
+      let query = `
+        SELECT p.post_id, p.author_id, p.author_name, p.author_avatar, p.tour_id,
+               p.title, p.slug, p.summary, p.content, p.thumbnail_url, p.trip_badge,
+               p.travel_tips, p.location_tags, p.likes_count, p.comments_count,
+               p.published_at, p.created_at,
+               t.title AS tour_title, t.departure_location, t.adult_price, t.duration_days, t.duration_nights
+        FROM dbo.blog_posts p
+        LEFT JOIN dbo.tours t ON (p.tour_id = CAST(t.tour_id AS VARCHAR(100)) OR p.tour_id = ('tour-' + CAST(t.tour_id AS VARCHAR(100))))
+        WHERE p.is_published = 1
+      `;
+
+      if (tourId) {
+        query += ` AND p.tour_id = @tourId`;
+      }
+      if (keyword) {
+        query += ` AND (p.title LIKE @kw OR p.summary LIKE @kw OR p.location_tags LIKE @kw)`;
+      }
+      query += ` ORDER BY p.created_at DESC;`;
+
+      const request = pool.request();
+      if (tourId) request.input('tourId', sql.VarChar(100), String(tourId));
+      if (keyword) request.input('kw', sql.NVarChar(200), `%${keyword.trim()}%`);
+
+      const result = await request.query(query);
+      const posts = result.recordset.map((row) => ({
+        id: `post-${row.post_id}`,
+        postId: row.post_id,
+        authorId: row.author_id,
+        authorName: row.author_name,
+        authorAvatar: row.author_avatar || 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&w=150&q=80',
+        tourId: row.tour_id,
+        tourInfo: row.tour_title ? {
+          title: row.tour_title,
+          departureLocation: row.departure_location,
+          price: Number(row.adult_price),
+          duration: `${row.duration_days}N${row.duration_nights}Đ`
+        } : null,
+        title: row.title,
+        slug: row.slug,
+        summary: row.summary,
+        content: row.content,
+        thumbnailUrl: row.thumbnail_url,
+        tripBadge: row.trip_badge,
+        travelTips: row.travel_tips,
+        locationTags: row.location_tags ? row.location_tags.split(',').map((s) => s.trim()) : [],
+        likesCount: Number(row.likes_count || 0),
+        commentsCount: Number(row.comments_count || 0),
+        date: new Date(row.published_at || row.created_at).toLocaleDateString('vi-VN')
+      }));
+
+      return res.json({ success: true, data: posts });
+    }
+  } catch (err) {
+    console.error('[GET /api/community/posts] Lỗi:', err.message);
+  }
+
+  res.json({ success: true, data: [] });
+});
+
+// 10.2. Lấy chi tiết bài viết kèm danh sách bình luận
+app.get('/api/community/posts/:id', async (req, res) => {
+  const { id } = req.params;
+  const cleanId = String(id).replace(/^post-/, '');
+
+  try {
+    const pool = await getDbPool();
+    if (pool) {
+      const postRes = await pool.request()
+        .input('postId', sql.BigInt, cleanId)
+        .query(`
+          SELECT p.*, t.title AS tour_title, t.departure_location, t.adult_price
+          FROM dbo.blog_posts p
+          LEFT JOIN dbo.tours t ON (p.tour_id = CAST(t.tour_id AS VARCHAR(100)) OR p.tour_id = ('tour-' + CAST(t.tour_id AS VARCHAR(100))))
+          WHERE p.post_id = @postId;
+        `);
+
+      if (postRes.recordset.length === 0) {
+        return res.status(404).json({ success: false, message: 'Không tìm thấy bài viết' });
+      }
+
+      const p = postRes.recordset[0];
+      const commRes = await pool.request()
+        .input('postId', sql.BigInt, cleanId)
+        .query(`
+          SELECT * FROM dbo.blog_comments
+          WHERE post_id = @postId
+          ORDER BY created_at DESC;
+        `);
+
+      const comments = commRes.recordset.map((c) => ({
+        id: `comm-${c.comment_id}`,
+        authorName: c.author_name,
+        authorAvatar: c.author_avatar,
+        content: c.content,
+        date: new Date(c.created_at).toLocaleDateString('vi-VN')
+      }));
+
+      return res.json({
+        success: true,
+        data: {
+          id: `post-${p.post_id}`,
+          postId: p.post_id,
+          title: p.title,
+          summary: p.summary,
+          content: p.content,
+          thumbnailUrl: p.thumbnail_url,
+          authorName: p.author_name,
+          authorAvatar: p.author_avatar,
+          tripBadge: p.trip_badge,
+          travelTips: p.travel_tips,
+          locationTags: p.location_tags ? p.location_tags.split(',').map((s) => s.trim()) : [],
+          likesCount: Number(p.likes_count),
+          commentsCount: Number(p.comments_count),
+          tourId: p.tour_id,
+          tourTitle: p.tour_title,
+          date: new Date(p.created_at).toLocaleDateString('vi-VN'),
+          comments
+        }
+      });
+    }
+  } catch (err) {
+    console.error('[GET /api/community/posts/:id] Lỗi:', err.message);
+  }
+
+  res.status(500).json({ success: false, message: 'Lỗi tải bài viết' });
+});
+
+// 10.3. Du khách đăng tải bài viết nhật ký hành trình UGC
+app.post('/api/community/posts', async (req, res) => {
+  const { title, summary, content, thumbnailUrl, tourId, travelTips, locationTags, authorName, authorAvatar, tripBadge, userId } = req.body;
+
+  if (!title || !content) {
+    return res.status(400).json({ success: false, message: 'Tiêu đề và nội dung nhật ký hành trình không được để trống' });
+  }
+
+  const slug = `${createSlug(title)}-${Date.now().toString(36)}`;
+  const effectiveAuthor = authorName || 'Du khách đam mê xê dịch';
+  const effectiveAvatar = authorAvatar || 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&w=150&q=80';
+  const effectiveBadge = tripBadge || 'Chuyến đi thực tế đã xác thực';
+
+  try {
+    const pool = await getDbPool();
+    if (pool) {
+      const result = await pool.request()
+        .input('authorId', sql.VarChar(100), String(userId || '3'))
+        .input('authorName', sql.NVarChar(150), effectiveAuthor)
+        .input('authorAvatar', sql.NVarChar(500), effectiveAvatar)
+        .input('tourId', sql.VarChar(100), tourId ? String(tourId) : null)
+        .input('title', sql.NVarChar(255), title.trim())
+        .input('slug', sql.VarChar(270), slug)
+        .input('summary', sql.NVarChar(500), summary ? summary.trim() : title.trim())
+        .input('content', sql.NVarChar(sql.MAX), content.trim())
+        .input('thumbnailUrl', sql.NVarChar(500), thumbnailUrl || 'https://images.unsplash.com/photo-1506744038136-46273834b3fb?auto=format&fit=crop&w=1200&q=80')
+        .input('tripBadge', sql.NVarChar(150), effectiveBadge)
+        .input('travelTips', sql.NVarChar(sql.MAX), travelTips ? travelTips.trim() : null)
+        .input('locationTags', sql.NVarChar(255), locationTags || 'Du lịch Việt Nam, Trải nghiệm')
+        .query(`
+          INSERT INTO dbo.blog_posts (
+            author_id, author_name, author_avatar, tour_id, title, slug, summary, content,
+            thumbnail_url, trip_badge, travel_tips, location_tags, likes_count, comments_count, is_published, published_at, created_at
+          )
+          OUTPUT INSERTED.post_id
+          VALUES (
+            @authorId, @authorName, @authorAvatar, @tourId, @title, @slug, @summary, @content,
+            @thumbnailUrl, @tripBadge, @travelTips, @locationTags, 0, 0, 1, GETDATE(), GETDATE()
+          );
+        `);
+
+      const newPostId = result.recordset[0].post_id;
+
+      // Tạo thông báo trong Notification Hub
+      await pool.request()
+        .input('userId', sql.VarChar(100), String(userId || '3'))
+        .input('type', sql.VarChar(50), 'COMMUNITY')
+        .input('channel', sql.VarChar(20), 'IN_APP')
+        .input('title', sql.NVarChar(200), 'Nhật ký hành trình đã được xuất bản!')
+        .input('message', sql.NVarChar(sql.MAX), `Bài viết "${title}" của bạn đã được xuất bản lên không gian cộng đồng Travel With Me. Hãy cùng chia sẻ để lan tỏa cảm hứng du lịch nhé!`)
+        .input('dataPayload', sql.NVarChar(sql.MAX), JSON.stringify({ postId: newPostId }))
+        .query(`
+          INSERT INTO dbo.notifications (user_id, type, channel, title, message, data_payload, is_read, created_at)
+          VALUES (@userId, @type, @channel, @title, @message, @dataPayload, 0, GETDATE());
+        `);
+
+      cache.del('community');
+
+      return res.status(201).json({
+        success: true,
+        message: 'Đăng tải nhật ký hành trình lên cộng đồng thành công!',
+        data: {
+          id: `post-${newPostId}`,
+          postId: newPostId,
+          title,
+          slug
+        }
+      });
+    }
+  } catch (err) {
+    console.error('[POST /api/community/posts] Lỗi:', err.message);
+    res.status(500).json({ success: false, message: 'Không thể đăng tải bài viết lúc này' });
+  }
+});
+
+// 10.4. Tương tác Thích (Like) bài viết
+app.post('/api/community/posts/:id/like', async (req, res) => {
+  const { id } = req.params;
+  const cleanId = String(id).replace(/^post-/, '');
+
+  try {
+    const pool = await getDbPool();
+    if (pool) {
+      const upd = await pool.request()
+        .input('postId', sql.BigInt, cleanId)
+        .query(`
+          UPDATE dbo.blog_posts
+          SET likes_count = likes_count + 1
+          OUTPUT INSERTED.likes_count
+          WHERE post_id = @postId;
+        `);
+
+      cache.del('community');
+      const newLikes = upd.recordset[0]?.likes_count || 1;
+      return res.json({ success: true, likesCount: newLikes });
+    }
+  } catch (err) {
+    console.error('[POST /api/community/posts/:id/like] Lỗi:', err.message);
+  }
+  res.json({ success: true, likesCount: 1 });
+});
+
+// 10.5. Bình luận bài viết cộng đồng
+app.post('/api/community/posts/:id/comments', async (req, res) => {
+  const { id } = req.params;
+  const { content, authorName, authorAvatar, userId } = req.body;
+  const cleanId = String(id).replace(/^post-/, '');
+
+  if (!content || !content.trim()) {
+    return res.status(400).json({ success: false, message: 'Nội dung bình luận không được để trống' });
+  }
+
+  const effectiveAuthor = authorName || 'Du khách thân thiết';
+  const effectiveAvatar = authorAvatar || 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&w=150&q=80';
+
+  try {
+    const pool = await getDbPool();
+    if (pool) {
+      const insRes = await pool.request()
+        .input('postId', sql.BigInt, cleanId)
+        .input('userId', sql.VarChar(100), String(userId || '3'))
+        .input('authorName', sql.NVarChar(150), effectiveAuthor)
+        .input('authorAvatar', sql.NVarChar(500), effectiveAvatar)
+        .input('content', sql.NVarChar(sql.MAX), content.trim())
+        .query(`
+          INSERT INTO dbo.blog_comments (post_id, user_id, author_name, author_avatar, content, created_at)
+          OUTPUT INSERTED.comment_id
+          VALUES (@postId, @userId, @authorName, @authorAvatar, @content, GETDATE());
+
+          UPDATE dbo.blog_posts
+          SET comments_count = comments_count + 1
+          WHERE post_id = @postId;
+        `);
+
+      cache.del('community');
+
+      return res.status(201).json({
+        success: true,
+        message: 'Đã gửi bình luận thành công',
+        data: {
+          id: `comm-${insRes.recordset[0].comment_id}`,
+          authorName: effectiveAuthor,
+          authorAvatar: effectiveAvatar,
+          content: content.trim(),
+          date: new Date().toLocaleDateString('vi-VN')
+        }
+      });
+    }
+  } catch (err) {
+    console.error('[POST /api/community/posts/:id/comments] Lỗi:', err.message);
+    res.status(500).json({ success: false, message: 'Lỗi gửi bình luận' });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 11. PHÂN HỆ TRUNG TÂM THÔNG BÁO ĐA KÊNH (NOTIFICATION HUB)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// 11.1. Lấy danh sách thông báo của tài khoản đang đăng nhập
+app.get('/api/notifications', async (req, res) => {
+  const { userId } = req.query;
+  const targetUser = String(userId || '3');
+
+  try {
+    const pool = await getDbPool();
+    if (pool) {
+      const result = await pool.request()
+        .input('userId', sql.VarChar(100), targetUser)
+        .query(`
+          SELECT * FROM dbo.notifications
+          WHERE user_id = @userId OR user_id = 'all'
+          ORDER BY created_at DESC;
+        `);
+
+      const notifications = result.recordset.map((n) => {
+        let payload = null;
+        if (n.data_payload) {
+          try {
+            payload = typeof n.data_payload === 'string' ? JSON.parse(n.data_payload) : n.data_payload;
+          } catch {
+            payload = {};
+          }
+        }
+        return {
+          id: `notif-${n.notification_id}`,
+          notificationId: n.notification_id,
+          type: n.type,
+          channel: n.channel, // IN_APP, EMAIL, SMS, ZALO
+          title: n.title,
+          message: n.message,
+          data: payload,
+          isRead: Boolean(n.is_read),
+          time: new Date(n.created_at).toLocaleString('vi-VN')
+        };
+      });
+
+      return res.json({ success: true, data: notifications });
+    }
+  } catch (err) {
+    console.error('[GET /api/notifications] Lỗi:', err.message);
+  }
+
+  res.json({ success: true, data: [] });
+});
+
+// 11.2. Đánh dấu 1 thông báo đã đọc
+app.patch('/api/notifications/:id/read', async (req, res) => {
+  const { id } = req.params;
+  const cleanId = String(id).replace(/^notif-/, '');
+
+  try {
+    const pool = await getDbPool();
+    if (pool) {
+      await pool.request()
+        .input('notifId', sql.BigInt, cleanId)
+        .query(`UPDATE dbo.notifications SET is_read = 1 WHERE notification_id = @notifId;`);
+    }
+  } catch (err) {
+    console.warn('[PATCH /api/notifications/:id/read] Lỗi:', err.message);
+  }
+  res.json({ success: true, message: 'Đã đánh dấu đã đọc' });
+});
+
+// 11.3. Đánh dấu tất cả thông báo đã đọc
+app.post('/api/notifications/read-all', async (req, res) => {
+  const { userId } = req.body;
+  const targetUser = String(userId || '3');
+
+  try {
+    const pool = await getDbPool();
+    if (pool) {
+      await pool.request()
+        .input('userId', sql.VarChar(100), targetUser)
+        .query(`UPDATE dbo.notifications SET is_read = 1 WHERE user_id = @userId;`);
+    }
+  } catch (err) {
+    console.warn('[POST /api/notifications/read-all] Lỗi:', err.message);
+  }
+  res.json({ success: true, message: 'Đã đánh dấu tất cả đã đọc' });
+});
+
+// 11.4. Tự động hóa thông báo: Kích hoạt quét và gửi nhắc lịch trước 24 giờ qua Email, SMS, Zalo ZNS
+app.post('/api/notifications/simulate-reminder', async (req, res) => {
+  const { bookingCode, channel } = req.body;
+  const targetChannel = channel || 'ZALO'; // EMAIL, SMS, ZALO
+
+  try {
+    const pool = await getDbPool();
+    if (pool) {
+      const bookingRes = await pool.request()
+        .input('code', sql.VarChar(100), bookingCode || 'TWM-20261017-001')
+        .query(`SELECT TOP 1 * FROM dbo.bookings WHERE booking_code = @code OR booking_status = 'CONFIRMED';`);
+
+      const bk = bookingRes.recordset[0];
+      const targetUser = bk ? String(bk.user_id) : '3';
+      const tourTitle = bk ? bk.tour_title : 'Tour Khám Phá Vịnh Hạ Long';
+
+      const reminderTitle = targetChannel === 'ZALO'
+        ? 'Nhắc lịch khởi hành trước 24 giờ (Zalo ZNS tự động)'
+        : (targetChannel === 'SMS' ? 'Nhắc lịch khởi hành (SMS Brandname)' : 'Thông báo lịch khởi hành & Hướng dẫn viên (Email)');
+
+      const reminderMsg = `Kính gửi Quý khách ${bk?.contact_name || 'Nguyễn Quốc Hùng'}! Chuyến đi "${tourTitle}" sẽ khởi hành vào 07:30 sáng mai. Hướng dẫn viên phụ trách: Lê Minh Quân (SĐT: 0912.888.999). Quý khách vui lòng chuẩn bị CCCD và xem vé điện tử đính kèm.`;
+
+      await pool.request()
+        .input('userId', sql.VarChar(100), targetUser)
+        .input('type', sql.VarChar(50), 'TRIP_REMINDER_24H')
+        .input('channel', sql.VarChar(20), targetChannel)
+        .input('title', sql.NVarChar(200), reminderTitle)
+        .input('message', sql.NVarChar(sql.MAX), reminderMsg)
+        .input('dataPayload', sql.NVarChar(sql.MAX), JSON.stringify({ bookingCode: bk?.booking_code, action: 'VIEW_TICKET' }))
+        .query(`
+          INSERT INTO dbo.notifications (user_id, type, channel, title, message, data_payload, is_read, created_at)
+          VALUES (@userId, @type, @channel, @title, @message, @dataPayload, 0, GETDATE());
+        `);
+
+      return res.json({
+        success: true,
+        message: `Đã gửi thông báo nhắc lịch khởi hành trước 24 giờ qua kênh ${targetChannel} thành công!`,
+        data: { channel: targetChannel, title: reminderTitle, message: reminderMsg }
+      });
+    }
+  } catch (err) {
+    console.error('[simulate-reminder] Lỗi:', err.message);
+  }
+
+  res.json({ success: true, message: 'Đã mô phỏng gửi nhắc lịch khởi hành thành công' });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 12. PHÂN HỆ ĐA TIỀN TỆ & TỶ GIÁ THỜI GIAN THỰC (MULTI-CURRENCY)
+// ─────────────────────────────────────────────────────────────────────────────
+
+app.get('/api/exchange-rates', cacheMiddleware(3600, 'rates'), (req, res) => {
+  // Tỷ giá chuẩn theo thị trường ngoại hối quốc tế 2026 (Base VND)
+  const rates = {
+    base: 'VND',
+    updatedAt: new Date().toISOString(),
+    rates: {
+      VND: 1,
+      USD: 0.0000393,    // 1 USD ~ 25,450 VND
+      EUR: 0.0000368,    // 1 EUR ~ 27,200 VND
+      JPY: 0.00595       // 1 JPY ~ 168 VND
+    },
+    symbols: {
+      VND: '₫',
+      USD: '$',
+      EUR: '€',
+      JPY: '¥'
+    }
+  };
+
+  res.json({ success: true, data: rates });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 13. GIÁM SÁT HIỆU NĂNG BỘ NHỚ ĐỆM (CACHE & REDIS PERFORMANCE)
+// ─────────────────────────────────────────────────────────────────────────────
+
+app.get('/api/cache/stats', (req, res) => {
+  res.json({ success: true, data: cache.getStats() });
+});
+
+app.post('/api/cache/flush', async (req, res) => {
+  await cache.flush();
+  res.json({ success: true, message: 'Đã dọn dẹp toàn bộ bộ nhớ đệm (Flush Cache) thành công!' });
 });
 
 // 10. Admin: Lấy toàn bộ danh sách đơn đặt tour từ SQL Server (kết nối tất cả tài khoản khách)
@@ -1564,8 +2335,8 @@ app.get('/api/db/health', async (req, res) => {
   }
 });
 
-app.listen(PORT, async () => {
-  console.log(`[Travel With Me API] Server running at http://localhost:${PORT}`);
+app.listen(PORT, '0.0.0.0', async () => {
+  console.log(`[Travel With Me API] Server running at http://localhost:${PORT} (LAN: http://0.0.0.0:${PORT})`);
   try {
     const pool = await getDbPool();
     console.log('[Travel With Me API] ✅ Đã kết nối thành công với Microsoft SQL Server (Database: TravelWithMe)!');

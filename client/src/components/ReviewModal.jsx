@@ -1,13 +1,30 @@
 import React, { useState } from 'react';
-import { X, Star, Upload, CheckCircle2 } from 'lucide-react';
+import { X, Star, Upload, CheckCircle2, ShieldCheck, Image, Trash2 } from 'lucide-react';
+
+const SAMPLE_PHOTO_PRESETS = [
+  'https://images.unsplash.com/photo-1528127269322-539801943592?auto=format&fit=crop&w=600&q=80',
+  'https://images.unsplash.com/photo-1507525428034-b723cf961d3e?auto=format&fit=crop&w=600&q=80',
+  'https://images.unsplash.com/photo-1544644181-1484b3fdfc62?auto=format&fit=crop&w=600&q=80'
+];
 
 export function ReviewModal({ booking, onClose, onSubmitReview }) {
   const [rating, setRating] = useState(5);
   const [hoverRating, setHoverRating] = useState(0);
   const [comment, setComment] = useState('');
+  const [photos, setPhotos] = useState([]);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
-  const handleSubmit = (e) => {
+  const handleAddSamplePhoto = (url) => {
+    if (!photos.includes(url)) {
+      setPhotos([...photos, url]);
+    }
+  };
+
+  const handleRemovePhoto = (idx) => {
+    setPhotos(photos.filter((_, i) => i !== idx));
+  };
+
+  const handleSubmit = async (e) => {
     e.preventDefault();
     if (!comment.trim()) {
       alert('Vui lòng chia sẻ cảm nghĩ của bạn về chuyến đi');
@@ -15,36 +32,54 @@ export function ReviewModal({ booking, onClose, onSubmitReview }) {
     }
 
     setIsSubmitting(true);
-    setTimeout(() => {
-      onSubmitReview({
-        bookingId: booking.id,
-        tourId: booking.tourId,
+    try {
+      await onSubmitReview({
+        bookingId: booking.id || booking.bookingCode,
+        tourId: booking.tourId || booking.tour_id,
         rating,
         comment,
-        authorName: booking.contactName,
-        photos: []
+        authorName: booking.contactName || booking.contact_name || 'Khách Du Lịch',
+        photos
       });
-      setIsSubmitting(false);
       onClose();
-    }, 600);
+    } catch (err) {
+      alert(err.message || 'Không thể gửi đánh giá');
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   return (
     <div className="modal-backdrop" onClick={onClose}>
       <div className="modal-dialog review-dialog" onClick={(e) => e.stopPropagation()}>
         <div className="review-modal-header">
-          <h3>Đánh Giá Chuyến Đi</h3>
+          <div>
+            <h3>Đánh Giá Chuyến Đi</h3>
+            <span className="review-sub-badge">
+              <ShieldCheck size={14} className="text-cyan" />
+              Chính sách minh bạch & xác thực 100%
+            </span>
+          </div>
           <button className="btn-close-modal" onClick={onClose}>
             <X size={20} />
           </button>
         </div>
 
+        {/* Policy Notice */}
+        <div className="review-policy-notice">
+          <CheckCircle2 size={16} className="text-emerald" />
+          <span>
+            Đánh giá này được bảo đảm bởi đơn hàng hoàn thành: <strong>#{booking.bookingCode || booking.id}</strong>.
+            Nhận xét của bạn giúp cộng đồng du khách có góc nhìn thực tế và khách quan nhất.
+          </span>
+        </div>
+
         <form onSubmit={handleSubmit} className="review-form-body">
           <div className="review-tour-preview">
-            <img src={booking.tourImage} alt="tour" className="review-thumb" />
+            <img src={booking.tourImage || booking.tour_image} alt="tour" className="review-thumb" />
             <div>
-              <h4 className="review-tour-name">{booking.tourTitle}</h4>
-              <p className="review-tour-date">Đã hoàn thành ngày {booking.returnDate}</p>
+              <h4 className="review-tour-name">{booking.tourTitle || booking.tour_title}</h4>
+              <p className="review-tour-date">Đã hoàn thành ngày {booking.returnDate || booking.return_date}</p>
             </div>
           </div>
 
@@ -90,10 +125,41 @@ export function ReviewModal({ booking, onClose, onSubmitReview }) {
             ></textarea>
           </div>
 
-          {/* Photo upload mock */}
-          <div className="photo-upload-mock">
-            <Upload size={18} className="text-primary-600" />
-            <span>Tải lên ảnh chụp thực tế trong chuyến đi (Tùy chọn)</span>
+          {/* Photos Upload & Selected Previews */}
+          <div className="review-photos-section">
+            <label className="picker-label">Hình ảnh chụp thực tế trong chuyến đi:</label>
+            <div className="photo-presets-chips">
+              <span className="preset-hint">Thêm ảnh mẫu thực tế:</span>
+              {SAMPLE_PHOTO_PRESETS.map((pUrl, i) => (
+                <button
+                  type="button"
+                  key={i}
+                  className="btn-add-sample-photo"
+                  onClick={() => handleAddSamplePhoto(pUrl)}
+                >
+                  <Image size={13} />
+                  <span>Ảnh thực tế {i + 1}</span>
+                </button>
+              ))}
+            </div>
+
+            {photos.length > 0 && (
+              <div className="selected-photos-preview">
+                {photos.map((p, idx) => (
+                  <div key={idx} className="preview-photo-wrap">
+                    <img src={p} alt="review" />
+                    <button
+                      type="button"
+                      className="btn-remove-photo"
+                      onClick={() => handleRemovePhoto(idx)}
+                      title="Gỡ ảnh này"
+                    >
+                      <Trash2 size={13} />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
 
           <div className="review-footer-actions">
@@ -101,7 +167,7 @@ export function ReviewModal({ booking, onClose, onSubmitReview }) {
               Hủy bỏ
             </button>
             <button type="submit" className="btn btn-primary" disabled={isSubmitting}>
-              {isSubmitting ? 'Đang gửi...' : 'Gửi Đánh Giá Ngay'}
+              {isSubmitting ? 'Đang gửi...' : 'Gửi Đánh Giá Xác Thực'}
             </button>
           </div>
         </form>

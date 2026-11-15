@@ -2,8 +2,9 @@ import React from 'react';
 import {
   Compass, Heart, Briefcase, Shield, User, Sparkles,
   Crown, Key, LogIn, LogOut, Award, ChevronLeft, ChevronRight,
-  Flame, Layers, X, Menu, Palmtree, MapPin
+  Flame, Layers, X, Menu, Palmtree, MapPin, Bell, BookOpen, Globe
 } from 'lucide-react';
+import { useLocale } from '../context/LocaleContext';
 
 export function Sidebar({
   isOpen,
@@ -20,8 +21,11 @@ export function Sidebar({
   openRoleModal,
   openAuth,
   onLogout,
-  showToast
+  showToast,
+  onOpenNotifications,
+  unreadNotificationsCount = 0
 }) {
+  const { t } = useLocale();
   const effectiveRole = authUser?.role || currentUser?.role || 'USER';
   const isAdmin = effectiveRole === 'SUPER_ADMIN' || effectiveRole === 'ADMIN';
   const canAccessAdmin = isAdmin || effectiveRole === 'STAFF';
@@ -111,12 +115,12 @@ export function Sidebar({
             <button
               className={`sidebar-nav-item ${currentView === 'client' ? 'active' : ''}`}
               onClick={() => handleNavClick(() => setCurrentView('client'))}
-              title="Khám Phá Tour"
+              title={t('exploreTours')}
             >
               <div className="nav-item-icon">
                 <Compass size={20} />
               </div>
-              {isOpen && <span className="nav-item-text">Khám Phá Tour</span>}
+              {isOpen && <span className="nav-item-text">{t('exploreTours')}</span>}
             </button>
 
             {/* 2. Tour Bán Chạy */}
@@ -124,14 +128,14 @@ export function Sidebar({
               href="#catalog-section"
               className="sidebar-nav-item"
               onClick={() => handleNavClick()}
-              title="Tour Bán Chạy"
+              title={t('hotTours')}
             >
               <div className="nav-item-icon text-amber">
                 <Flame size={20} />
               </div>
               {isOpen && (
                 <>
-                  <span className="nav-item-text">Tour Bán Chạy</span>
+                  <span className="nav-item-text">{t('hotTours')}</span>
                   <span className="nav-item-tag hot">HOT</span>
                 </>
               )}
@@ -142,26 +146,26 @@ export function Sidebar({
               href="#catalog-section"
               className="sidebar-nav-item"
               onClick={() => handleNavClick()}
-              title="Chủ Đề Du Lịch"
+              title={t('topics')}
             >
               <div className="nav-item-icon text-cyan">
                 <Palmtree size={20} />
               </div>
-              {isOpen && <span className="nav-item-text">Chủ Đề Du Lịch</span>}
+              {isOpen && <span className="nav-item-text">{t('topics')}</span>}
             </a>
 
             {/* 4. Chuyến Đi Của Tôi */}
             <button
               className="sidebar-nav-item highlight-item"
               onClick={() => handleNavClick(openMyTrips)}
-              title="Chuyến Đi Của Tôi"
+              title={t('myTrips')}
             >
               <div className="nav-item-icon text-orange">
                 <Briefcase size={20} />
               </div>
               {isOpen && (
                 <>
-                  <span className="nav-item-text">Chuyến Đi Của Tôi</span>
+                  <span className="nav-item-text">{t('myTrips')}</span>
                   {bookingsCount > 0 && (
                     <span className="nav-item-badge blue">{bookingsCount}</span>
                   )}
@@ -173,16 +177,52 @@ export function Sidebar({
             <button
               className="sidebar-nav-item"
               onClick={() => handleNavClick(openWishlist)}
-              title="Tour Yêu Thích"
+              title={t('wishlist')}
             >
               <div className="nav-item-icon text-rose">
                 <Heart size={20} className={wishlistCount > 0 ? 'heart-active' : ''} />
               </div>
               {isOpen && (
                 <>
-                  <span className="nav-item-text">Tour Yêu Thích</span>
+                  <span className="nav-item-text">{t('wishlist')}</span>
                   {wishlistCount > 0 && (
                     <span className="nav-item-badge rose">{wishlistCount}</span>
+                  )}
+                </>
+              )}
+            </button>
+
+            {/* 6. Cộng Đồng & Nhật Ký Hành Trình (UGC) */}
+            <button
+              className={`sidebar-nav-item ${currentView === 'community' ? 'active' : ''}`}
+              onClick={() => handleNavClick(() => setCurrentView('community'))}
+              title={t('community')}
+            >
+              <div className="nav-item-icon text-cyan">
+                <BookOpen size={20} />
+              </div>
+              {isOpen && (
+                <>
+                  <span className="nav-item-text">{t('community')}</span>
+                  <span className="nav-item-tag hot">UGC</span>
+                </>
+              )}
+            </button>
+
+            {/* 7. Trung Tâm Thông Báo (Notification Hub) */}
+            <button
+              className="sidebar-nav-item"
+              onClick={() => handleNavClick(onOpenNotifications)}
+              title={t('notifications')}
+            >
+              <div className="nav-item-icon text-amber">
+                <Bell size={20} className={unreadNotificationsCount > 0 ? 'bell-ringing' : ''} />
+              </div>
+              {isOpen && (
+                <>
+                  <span className="nav-item-text">{t('notifications')}</span>
+                  {unreadNotificationsCount > 0 && (
+                    <span className="nav-item-badge rose">{unreadNotificationsCount}</span>
                   )}
                 </>
               )}

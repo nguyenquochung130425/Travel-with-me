@@ -13,7 +13,8 @@ import { AdminDashboard } from './components/AdminDashboard';
 import { ChatbotWidget } from './components/ChatbotWidget';
 import { RoleModal } from './components/RoleModal';
 import { AuthModal } from './components/AuthModal';
-import { SitePreloader } from './components/SitePreloader';
+import { CommunitySection } from './components/CommunitySection';
+import { NotificationHub } from './components/NotificationHub';
 
 import {
   mockTours,
@@ -35,6 +36,8 @@ export default function App() {
   const [adminDashboardData, setAdminDashboardData] = useState(null); // Thống kê tổng & biểu đồ tăng trưởng từ SQL Server
   const [wishlist, setWishlist] = useState([]); // Khởi tạo rỗng, nạp theo từng tài khoản
   const [showOnlyWishlist, setShowOnlyWishlist] = useState(false);
+  const [showNotificationHub, setShowNotificationHub] = useState(false);
+  const [notifications, setNotifications] = useState([]);
 
   // Sidebar Left Navigation State (có thể đóng/mở, lưu vào localStorage)
   const [isSidebarOpen, setIsSidebarOpen] = useState(() => {
@@ -89,12 +92,27 @@ export default function App() {
   const storedUser = (() => { try { return JSON.parse(localStorage.getItem('twm_user')); } catch { return null; } })();
   const [authUser, setAuthUser] = useState(storedUser); // real logged-in user (JWT)
   const [showAuth, setShowAuth] = useState(false);       // show login/register modal
-  const [showPreloader, setShowPreloader] = useState(true); // Full-screen count-up preloader khi vào trang web
 
-  // Đồng bộ Wishlist & Lịch sử Chuyến Đi theo tài khoản đăng nhập (userId)
+  // Helper nạp thông báo từ SQL Server theo userId
+  const loadNotifications = useCallback(async (uid) => {
+    try {
+      const res = await fetch(`/api/notifications?userId=${encodeURIComponent(uid || '3')}`);
+      const data = await res.json();
+      if (data.success && Array.isArray(data.data)) {
+        setNotifications(data.data);
+      }
+    } catch (e) {
+      console.log('Error loading notifications:', e);
+    }
+  }, []);
+
+  // Đồng bộ Wishlist, Lịch sử Chuyến Đi & Thông báo theo tài khoản đăng nhập (userId)
   useEffect(() => {
+    const uid = authUser?.userId || authUser?.id || '3';
+    // Nạp thông báo đa kênh
+    loadNotifications(uid);
+
     if (authUser?.userId || authUser?.id) {
-      const uid = authUser.userId || authUser.id;
       // 1. Tải danh sách yêu thích của riêng tài khoản này từ localStorage
       try {
         const savedWishlist = JSON.parse(localStorage.getItem(`twm_wishlist_${uid}`) || '[]');
@@ -123,7 +141,83 @@ export default function App() {
       setBookings([]);
       setShowOnlyWishlist(false);
     }
-  }, [authUser]);
+  }, [authUser, loadNotifications]);
+
+  // Notification action handlers
+  const handleMarkNotificationAsRead = useCallback(async (id) => {
+    try {
+      await fetch(`/api/notifications/${id}/read`, { method: 'PATCH' });
+      setNotifications((prev) =>
+        prev.map((n) => (n.id === id ? { ...n, is_read: 1 } : n))
+      );
+    } catch (e) {
+      console.error(e);
+    }
+  }, []);
+
+  const handleMarkAllNotificationsAsRead = useCallback(async () => {
+    const uid = authUser?.userId || authUser?.id || currentUser.id || '3';
+    try {
+      await fetch('/api/notifications/read-all', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userId: uid })
+      });
+      setNotifications((prev) => prev.map((n) => ({ ...n, is_read: 1 })));
+      showToast('Đã đánh dấu tất cả thông báo là đã đọc');
+    } catch (e) {
+      console.error(e);
+    }
+  }, [authUser, currentUser, showToast]);
+
+  const handleSimulateReminder = useCallback(async (channel = 'ZALO') => {
+    const uid = authUser?.userId || authUser?.id || currentUser.id || '3';
+    const targetBooking = bookings.find((b) => b.status === 'CONFIRMED' || b.status === 'PAID') || bookings[0];
+    const bookingId = targetBooking ? (targetBooking.bookingCode || targetBooking.id) : 'BK-DEMO-2026';
+
+    try {
+      const res = await fetch('/api/notifications/simulate-reminder', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userId: uid, bookingId, channel })
+      });
+      const data = await res.json();
+      if (data.success && data.data) {
+        setNotifications((prev) => [data.data, ...prev]);
+        showToast(`Đã gửi thông báo nhắc lịch 24h trước giờ khởi hành qua kênh [${channel}]!`);
+      }
+    } catch (e) {
+      showToast('Lỗi khi kích hoạt thông báo nhắc lịch');
+    }
+  }, [authUser, currentUser, bookings, showToast]);
+
+  const handleNotificationAction = useCallback((notif) => {
+    if (!notif.action_url) return;
+    if (notif.action_url.startsWith('#ticket-')) {
+      const code = notif.action_url.replace('#ticket-', '');
+      const matched = bookings.find((b) => b.bookingCode === code || b.id === code);
+      if (matched) {
+        setViewingTicket(matched);
+        setShowNotificationHub(false);
+      } else {
+        setShowMyTrips(true);
+        setShowNotificationHub(false);
+      }
+    } else if (notif.action_url.startsWith('#community')) {
+      setCurrentView('community');
+      setShowNotificationHub(false);
+    } else if (notif.action_url.startsWith('#review-')) {
+      const code = notif.action_url.replace('#review-', '');
+      const matched = bookings.find((b) => b.bookingCode === code || b.id === code);
+      if (matched) {
+        setReviewBookingTarget(matched);
+        setShowNotificationHub(false);
+      } else {
+        setShowMyTrips(true);
+        setShowNotificationHub(false);
+      }
+    }
+  }, [bookings]);
 
   const handleLoginSuccess = useCallback((userData) => {
     setAuthUser(userData);
@@ -460,36 +554,39 @@ export default function App() {
     }
   };
 
-  // Submit Review
-  const handleSubmitReview = (reviewData) => {
-    setTours((prev) =>
-      prev.map((t) => {
-        if (t.id === reviewData.tourId) {
-          const revCount = t.reviewCount + 1;
-          const newAvg = Number(
-            (((t.ratingAverage * t.reviewCount) + reviewData.rating) / revCount).toFixed(1)
-          );
-          const newReviewObj = {
-            id: `rev-${Date.now()}`,
-            tourId: t.id,
-            authorName: reviewData.authorName,
-            authorAvatar: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=150&q=80',
-            rating: reviewData.rating,
-            date: new Date().toLocaleDateString('vi-VN'),
-            comment: reviewData.comment,
-            photos: []
-          };
-          return {
-            ...t,
-            ratingAverage: newAvg,
-            reviewCount: revCount,
-            reviews: [newReviewObj, ...(t.reviews || [])]
-          };
-        }
-        return t;
-      })
-    );
-    showToast('Cảm ơn bạn đã gửi đánh giá trải nghiệm!');
+  // Submit Review - Ghi nhận vào SQL Server & Kích hoạt Kiểm duyệt Admin
+  const handleSubmitReview = async (reviewData) => {
+    const uid = authUser?.userId || authUser?.id || currentUser.id || '3';
+    try {
+      const response = await fetch('/api/reviews', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          bookingId: reviewData.bookingId,
+          tourId: reviewData.tourId,
+          userId: uid,
+          authorName: reviewData.authorName,
+          authorAvatar: authUser?.avatar || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=150&q=80',
+          rating: reviewData.rating,
+          comment: reviewData.comment,
+          photos: reviewData.photos || []
+        })
+      });
+
+      const result = await response.json();
+      if (!response.ok || !result.success) {
+        throw new Error(result.message || 'Không thể lưu đánh giá');
+      }
+
+      showToast('Đánh giá xác thực của bạn đã được gửi thành công!');
+      // Tải lại danh sách tour và thông báo
+      refreshTours().catch(() => {});
+      loadNotifications(uid);
+    } catch (err) {
+      console.error('[Lỗi gửi đánh giá]:', err);
+      showToast(err.message || 'Lỗi khi gửi đánh giá');
+      throw err;
+    }
   };
 
   // Admin cập nhật trạng thái đơn đặt (Lưu trực tiếp vào Microsoft SQL Server)
@@ -543,11 +640,6 @@ export default function App() {
 
   return (
     <div className={`travel-app-root ${isSidebarOpen ? 'layout-sidebar-open' : 'layout-sidebar-closed'}`}>
-      {/* Full-screen count-up preloader khi vào trang web */}
-      {showPreloader && (
-        <SitePreloader onDone={() => setShowPreloader(false)} />
-      )}
-
       {/* Auth Modal (login / register / forgot-password) */}
       <AuthModal
         isOpen={showAuth}
@@ -607,6 +699,8 @@ export default function App() {
         openAuth={() => setShowAuth(true)}
         onLogout={handleLogout}
         showToast={showToast}
+        onOpenNotifications={() => setShowNotificationHub(true)}
+        unreadNotificationsCount={notifications.filter((n) => !n.is_read).length}
       />
 
       {/* Main Viewport Container */}
@@ -654,6 +748,8 @@ export default function App() {
           showToast={showToast}
           isSidebarOpen={isSidebarOpen}
           onToggleSidebar={toggleSidebar}
+          onOpenNotifications={() => setShowNotificationHub(true)}
+          unreadNotificationsCount={notifications.filter((n) => !n.is_read).length}
         />
 
         {/* MAIN VIEW: CLIENT OR ADMIN */}
@@ -748,6 +844,26 @@ export default function App() {
               </div>
             )}
           </section>
+        </main>
+      ) : currentView === 'community' ? (
+        /* TRAVEL COMMUNITY & UGC STORIES VIEW */
+        <main>
+          <CommunitySection
+            currentUser={authUser || currentUser}
+            bookings={bookings}
+            onSelectTour={(tourId) => {
+              const matched = tours.find(
+                (t) => t.id === tourId || t.tour_id === tourId || t.id === `dbtour-${tourId}`
+              );
+              if (matched) {
+                setActiveTourDetail(matched);
+                setCurrentView('client');
+              } else {
+                showToast('Chuyển hướng đến danh mục khám phá tour...');
+                setCurrentView('client');
+              }
+            }}
+          />
         </main>
       ) : (
         /* ADMIN DASHBOARD VIEW */
@@ -891,6 +1007,17 @@ export default function App() {
           }
         }}
         onNotify={showToast}
+      />
+
+      {/* 7. Multi-channel Notification Hub Drawer */}
+      <NotificationHub
+        isOpen={showNotificationHub}
+        onClose={() => setShowNotificationHub(false)}
+        notifications={notifications}
+        onMarkAsRead={handleMarkNotificationAsRead}
+        onMarkAllAsRead={handleMarkAllNotificationsAsRead}
+        onSimulateReminder={handleSimulateReminder}
+        onActionClick={handleNotificationAction}
       />
       </div> {/* Kết thúc app-main-viewport */}
     </div>

@@ -1,5 +1,6 @@
-import React from 'react';
-import { Compass, Heart, Briefcase, Shield, User, Sparkles, Crown, Key, LogIn, LogOut, Award, Menu, PanelLeftClose, PanelLeftOpen } from 'lucide-react';
+import React, { useState, useRef, useEffect } from 'react';
+import { Compass, Heart, Briefcase, Shield, User, Sparkles, Crown, Key, LogIn, LogOut, Award, Menu, PanelLeftClose, PanelLeftOpen, Bell, Globe, DollarSign, BookOpen } from 'lucide-react';
+import { useLocale } from '../context/LocaleContext';
 
 export function Navbar({
   currentView,
@@ -14,8 +15,28 @@ export function Navbar({
   onLogout,
   showToast,
   isSidebarOpen,
-  onToggleSidebar
+  onToggleSidebar,
+  onOpenNotifications,
+  unreadNotificationsCount = 0
 }) {
+  const { language, setLanguage, currency, setCurrency, t } = useLocale();
+  const [showLangDropdown, setShowLangDropdown] = useState(false);
+  const [showCurrDropdown, setShowCurrDropdown] = useState(false);
+  const langRef = useRef(null);
+  const currRef = useRef(null);
+
+  useEffect(() => {
+    const handleClickOutside = (e) => {
+      if (langRef.current && !langRef.current.contains(e.target)) {
+        setShowLangDropdown(false);
+      }
+      if (currRef.current && !currRef.current.contains(e.target)) {
+        setShowCurrDropdown(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
   const effectiveRole = authUser?.role || currentUser?.role || 'USER';
   const isAdmin = effectiveRole === 'SUPER_ADMIN' || effectiveRole === 'ADMIN';
   const canAccessAdmin = isAdmin || effectiveRole === 'STAFF';
@@ -83,16 +104,112 @@ export function Navbar({
           </div>
         </div>
 
-        {/* Center Section: Quick Highlights */}
+        {/* Center Section: Quick Highlights or Navigation */}
         <div className="navbar-center-info hidden-tablet">
-          <div className="nav-tag-pill">
-            <Sparkles size={14} className="text-amber" />
-            <span>Ưu đãi mùa hè giảm tới 30% cho tour gia đình</span>
-          </div>
+          <button
+            className={`nav-community-link ${currentView === 'community' ? 'active' : ''}`}
+            onClick={() => setCurrentView(currentView === 'community' ? 'client' : 'community')}
+            title="Khám phá Nhật ký hành trình & Cộng đồng du lịch"
+          >
+            <BookOpen size={15} className="text-cyan" />
+            <span>{t('community')}</span>
+            <span className="community-badge-glow">UGC</span>
+          </button>
         </div>
 
         {/* Right Section: Action Controls */}
         <div className="nav-actions">
+          {/* Language Selector Dropdown */}
+          <div className="locale-dropdown-wrapper" ref={langRef}>
+            <button
+              className="locale-pill-btn"
+              onClick={() => setShowLangDropdown(!showLangDropdown)}
+              title="Chuyển đổi ngôn ngữ / Switch Language"
+              aria-label="Language Selector"
+            >
+              <Globe size={16} />
+              <span className="locale-curr-text">{language === 'vi' ? '🇻🇳 VI' : '🇬🇧 EN'}</span>
+            </button>
+            {showLangDropdown && (
+              <div className="locale-menu-popover animate-fade-in">
+                <button
+                  className={`locale-option ${language === 'vi' ? 'selected' : ''}`}
+                  onClick={() => { setLanguage('vi'); setShowLangDropdown(false); }}
+                >
+                  <span className="flag-icon">🇻🇳</span>
+                  <span>Tiếng Việt</span>
+                </button>
+                <button
+                  className={`locale-option ${language === 'en' ? 'selected' : ''}`}
+                  onClick={() => { setLanguage('en'); setShowLangDropdown(false); }}
+                >
+                  <span className="flag-icon">🇬🇧</span>
+                  <span>English</span>
+                </button>
+              </div>
+            )}
+          </div>
+
+          {/* Currency Selector Dropdown */}
+          <div className="locale-dropdown-wrapper" ref={currRef}>
+            <button
+              className="locale-pill-btn"
+              onClick={() => setShowCurrDropdown(!showCurrDropdown)}
+              title="Chuyển đổi tiền tệ / Currency Rate"
+              aria-label="Currency Selector"
+            >
+              <DollarSign size={16} />
+              <span className="locale-curr-text">{currency}</span>
+            </button>
+            {showCurrDropdown && (
+              <div className="locale-menu-popover animate-fade-in">
+                <button
+                  className={`locale-option ${currency === 'VND' ? 'selected' : ''}`}
+                  onClick={() => { setCurrency('VND'); setShowCurrDropdown(false); }}
+                >
+                  <span className="curr-symbol">₫</span>
+                  <span>VNĐ (Việt Nam)</span>
+                </button>
+                <button
+                  className={`locale-option ${currency === 'USD' ? 'selected' : ''}`}
+                  onClick={() => { setCurrency('USD'); setShowCurrDropdown(false); }}
+                >
+                  <span className="curr-symbol">$</span>
+                  <span>USD (US Dollar)</span>
+                </button>
+                <button
+                  className={`locale-option ${currency === 'EUR' ? 'selected' : ''}`}
+                  onClick={() => { setCurrency('EUR'); setShowCurrDropdown(false); }}
+                >
+                  <span className="curr-symbol">€</span>
+                  <span>EUR (Euro)</span>
+                </button>
+                <button
+                  className={`locale-option ${currency === 'JPY' ? 'selected' : ''}`}
+                  onClick={() => { setCurrency('JPY'); setShowCurrDropdown(false); }}
+                >
+                  <span className="curr-symbol">¥</span>
+                  <span>JPY (Japanese Yen)</span>
+                </button>
+              </div>
+            )}
+          </div>
+
+          {/* Notification Hub Trigger Button */}
+          <button
+            className="action-icon-btn notif-bell-btn"
+            title="Trung tâm thông báo đa kênh"
+            onClick={onOpenNotifications}
+            aria-label="Notifications"
+          >
+            <Bell size={20} className={unreadNotificationsCount > 0 ? 'bell-ringing' : ''} />
+            {unreadNotificationsCount > 0 && (
+              <span className="badge-bubble badge-bubble-danger">
+                {unreadNotificationsCount > 9 ? '9+' : unreadNotificationsCount}
+              </span>
+            )}
+          </button>
+
           {/* Wishlist Button */}
           <button
             className="action-icon-btn"
@@ -115,12 +232,12 @@ export function Navbar({
               {currentView === 'client' ? (
                 <>
                   <Shield size={16} />
-                  <span className="hidden-mobile">Kênh Quản Trị</span>
+                  <span className="hidden-mobile">{t('adminPortal')}</span>
                 </>
               ) : (
                 <>
                   <Sparkles size={16} />
-                  <span className="hidden-mobile">Giao Diện Khách</span>
+                  <span className="hidden-mobile">{t('clientPortal')}</span>
                 </>
               )}
             </button>
@@ -163,7 +280,7 @@ export function Navbar({
                 title="Đăng xuất khỏi tài khoản"
               >
                 <LogOut size={16} />
-                <span className="logout-text hidden-mobile">Đăng Xuất</span>
+                <span className="logout-text hidden-mobile">{t('logout')}</span>
               </button>
             </div>
           ) : (
@@ -174,7 +291,7 @@ export function Navbar({
                 title="Đăng nhập hoặc đăng ký tài khoản"
               >
                 <LogIn size={16} />
-                <span>Đăng Nhập</span>
+                <span>{t('login')}</span>
               </button>
             </div>
           )}

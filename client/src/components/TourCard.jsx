@@ -1,7 +1,9 @@
 import React from 'react';
 import { Star, Clock, Plane, Bus, Heart, Calendar, ArrowRight, ShieldCheck, MapPin, Sparkles } from 'lucide-react';
+import { useLocale } from '../context/LocaleContext';
 
 export function TourCard({ tour, onSelectTour, onToggleWishlist, isWishlisted }) {
+  const { formatPrice, t } = useLocale();
   // Tìm giá thấp nhất từ schedules
   const minPrice = Math.min(...tour.schedules.map((s) => Number(s.adultPrice)));
   // Giá niêm yết tham chiếu (để hiển thị tiết kiệm giá trị)
@@ -101,12 +103,12 @@ export function TourCard({ tour, onSelectTour, onToggleWishlist, isWishlisted })
         <div className="tour-card-footer">
           <div className="card-price-box">
             <div className="price-original-row">
-              <span className="price-original">{originalPrice.toLocaleString('vi-VN')} đ</span>
+              <span className="price-original">{formatPrice(originalPrice)}</span>
               <span className="price-tag-save">Tiết kiệm 15%</span>
             </div>
             <div className="price-value">
-              {minPrice.toLocaleString('vi-VN')} <span className="currency">đ</span>
-              <span className="price-unit">/khách</span>
+              {formatPrice(minPrice)}
+              <span className="price-unit">/{t('perPerson')}</span>
             </div>
           </div>
           
@@ -114,7 +116,7 @@ export function TourCard({ tour, onSelectTour, onToggleWishlist, isWishlisted })
             className="btn btn-primary btn-sm btn-card-action"
             onClick={() => onSelectTour(tour)}
           >
-            <span>Đặt Chỗ</span>
+            <span>{t('bookNow')}</span>
             <ArrowRight size={15} className="btn-arrow-slide" />
           </button>
         </div>

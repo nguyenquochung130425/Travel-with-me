@@ -1,15 +1,29 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   X, Star, MapPin, Calendar, Clock, Plane, Bus, CheckCircle2,
-  XCircle, AlertCircle, Users, ArrowRight, ShieldCheck, MessageSquare, Map
+  XCircle, AlertCircle, Users, ArrowRight, ShieldCheck, MessageSquare, Map, Award
 } from 'lucide-react';
+import { useLocale } from '../context/LocaleContext';
 
 export function TourDetailModal({ tour, onClose, onStartBooking }) {
+  const { formatPrice, t } = useLocale();
   const [activeTab, setActiveTab] = useState('itinerary'); // 'itinerary' | 'policy' | 'reviews' | 'map'
   const [selectedScheduleId, setSelectedScheduleId] = useState(
     tour.schedules[0] ? tour.schedules[0].id : null
   );
   const [activeImageIndex, setActiveImageIndex] = useState(0);
+  const [reviewsList, setReviewsList] = useState(tour.reviews || []);
+
+  useEffect(() => {
+    fetch(`/api/reviews?tourId=${tour.id}`)
+      .then((res) => res.json())
+      .then((res) => {
+        if (res.success && Array.isArray(res.data) && res.data.length > 0) {
+          setReviewsList(res.data);
+        }
+      })
+      .catch((err) => console.log('Tour review fetch error:', err));
+  }, [tour.id]);
 
   // Passenger counts
   const [adults, setAdults] = useState(2);
@@ -271,18 +285,24 @@ export function TourDetailModal({ tour, onClose, onStartBooking }) {
                   </div>
 
                   <div className="reviews-list">
-                    {tour.reviews && tour.reviews.length > 0 ? (
-                      tour.reviews.map((rev) => (
+                    {reviewsList && reviewsList.length > 0 ? (
+                      reviewsList.map((rev) => (
                         <div key={rev.id} className="review-item-card">
                           <div className="review-user-row">
-                            <img src={rev.authorAvatar} alt={rev.authorName} className="rev-avatar" />
-                            <div>
-                              <div className="rev-name">{rev.authorName}</div>
+                            <img src={rev.authorAvatar || rev.author_avatar || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=150&q=80'} alt={rev.authorName || rev.author_name} className="rev-avatar" />
+                            <div className="rev-meta-info">
+                              <div className="rev-name-row">
+                                <span className="rev-name">{rev.authorName || rev.author_name}</span>
+                                <span className="rev-verified-badge" title="Đã hoàn thành chuyến đi thực tế trên hệ thống">
+                                  <CheckCircle2 size={13} className="text-emerald" />
+                                  <span>{t('verifiedTrip')}</span>
+                                </span>
+                              </div>
                               <div className="rev-stars">
-                                {[...Array(rev.rating)].map((_, i) => (
+                                {[...Array(Number(rev.rating) || 5)].map((_, i) => (
                                   <Star key={i} size={13} className="star-filled" />
                                 ))}
-                                <span className="rev-date">{rev.date}</span>
+                                <span className="rev-date">{rev.date || (rev.created_at ? new Date(rev.created_at).toLocaleDateString('vi-VN') : '')}</span>
                               </div>
                             </div>
                           </div>
@@ -292,6 +312,24 @@ export function TourDetailModal({ tour, onClose, onStartBooking }) {
                               {rev.photos.map((p, i) => (
                                 <img key={i} src={p} alt="user photo" className="rev-photo-thumb" />
                               ))}
+                            </div>
+                          )}
+
+                          {/* Official Admin Reply */}
+                          {rev.admin_reply && (
+                            <div className="rev-admin-reply-box animate-fade-in">
+                              <div className="admin-reply-head">
+                                <div className="admin-reply-title">
+                                  <ShieldCheck size={14} className="text-cyan" />
+                                  <span>{t('adminReplyBadge')}</span>
+                                </div>
+                                {rev.admin_reply_at && (
+                                  <span className="admin-reply-date">
+                                    {new Date(rev.admin_reply_at).toLocaleDateString('vi-VN')}
+                                  </span>
+                                )}
+                              </div>
+                              <p className="admin-reply-text">{rev.admin_reply}</p>
                             </div>
                           )}
                         </div>
@@ -308,10 +346,10 @@ export function TourDetailModal({ tour, onClose, onStartBooking }) {
             <div className="detail-right-booking">
               <div className="booking-widget-card glass-panel">
                 <div className="widget-header">
-                  <span className="widget-tag">Giá ưu đãi từ</span>
+                  <span className="widget-tag">{t('fromPrice')}</span>
                   <div className="widget-price">
-                    {selectedSchedule ? selectedSchedule.adultPrice.toLocaleString('vi-VN') : 0} 
-                    <span className="currency">đ / khách</span>
+                    {selectedSchedule ? formatPrice(selectedSchedule.adultPrice) : formatPrice(0)} 
+                    <span className="currency"> / {t('perPerson')}</span>
                   </div>
                 </div>
 
@@ -337,7 +375,7 @@ export function TourDetailModal({ tour, onClose, onStartBooking }) {
                           </div>
                           <div className="sch-slots-badge">
                             {isSoldOut ? (
-                              <span className="text-rose font-bold">Hết chỗ</span>
+                              <span className="text-rose font-bold">{t('soldOut')}</span>
                             ) : (
                               <span className="text-emerald">Còn {slots} chỗ</span>
                             )}
@@ -428,25 +466,25 @@ export function TourDetailModal({ tour, onClose, onStartBooking }) {
                 {/* Instant Pricing Breakdown */}
                 <div className="widget-price-breakdown">
                   <div className="breakdown-row">
-                    <span>Người lớn ({adults} x {selectedSchedule?.adultPrice.toLocaleString('vi-VN')} đ):</span>
-                    <span>{(adults * (selectedSchedule?.adultPrice || 0)).toLocaleString('vi-VN')} đ</span>
+                    <span>Người lớn ({adults} x {formatPrice(selectedSchedule?.adultPrice || 0)}):</span>
+                    <span>{formatPrice(adults * (selectedSchedule?.adultPrice || 0))}</span>
                   </div>
                   {children > 0 && (
                     <div className="breakdown-row">
-                      <span>Trẻ em ({children} x {selectedSchedule?.childPrice.toLocaleString('vi-VN')} đ):</span>
-                      <span>{(children * (selectedSchedule?.childPrice || 0)).toLocaleString('vi-VN')} đ</span>
+                      <span>Trẻ em ({children} x {formatPrice(selectedSchedule?.childPrice || 0)}):</span>
+                      <span>{formatPrice(children * (selectedSchedule?.childPrice || 0))}</span>
                     </div>
                   )}
                   {infants > 0 && (
                     <div className="breakdown-row">
-                      <span>Em bé ({infants} x {selectedSchedule?.infantPrice.toLocaleString('vi-VN')} đ):</span>
-                      <span>{(infants * (selectedSchedule?.infantPrice || 0)).toLocaleString('vi-VN')} đ</span>
+                      <span>Em bé ({infants} x {formatPrice(selectedSchedule?.infantPrice || 0)}):</span>
+                      <span>{formatPrice(infants * (selectedSchedule?.infantPrice || 0))}</span>
                     </div>
                   )}
                   <div className="breakdown-divider"></div>
                   <div className="breakdown-total">
                     <span>Tổng tiền tạm tính:</span>
-                    <strong className="total-val">{totalPrice.toLocaleString('vi-VN')} đ</strong>
+                    <strong className="total-val">{formatPrice(totalPrice)}</strong>
                   </div>
                 </div>
 
